@@ -1,0 +1,6 @@
+#!/bin/bash
+# Daily cron job for a2certrenew
+# Checks and renews certificates that are within 10 days of expiration
+# Place in /etc/cron.daily/
+
+exec /usr/local/bin/a2certrenew

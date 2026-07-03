@@ -1,0 +1,29 @@
+Usage: fqdnmgr <function> [arguments...]
+Available functions:
+  check <FQDN> [REGISTRAR]               - Check domain status (free/owned/taken/unavailable)
+  purchase <FQDN> <REGISTRAR>            - Purchase a domain
+  list [REGISTRAR] [local|remote]        - List domains: no args = all local (machine parsable)
+                                           with REGISTRAR: local = query DB, remote = query API
+  certify <REGISTRAR>                    - Set up DNS challenge for SSL certificate
+  cleanup <REGISTRAR>                    - Clean up DNS challenge records
+  setInitDNSRecords [-d "FQDN(S)"] [-r REGISTRAR] [-o] [--sync] [--timeout SECONDS]
+                                         - Set initial DNS records (A @, A *, MX @)
+                                           At least one of -d or -r is required
+                                           -d: space-separated domain(s) to process
+                                           -r: registrar (hint if -d given, required otherwise)
+                                           -o: override mode - delete all existing DNS records
+                                               and set only the 3 initial ones. Without this flag,
+                                               existing records are preserved and init records
+                                               are added/updated.
+                                           If only -r: process all owned domains at registrar
+                                           If only -r with -v: interactive domain selection
+                                           --sync: wait for DNS propagation before returning
+                                           --timeout: maximum wait time in seconds for DNS
+                                                     propagation (default: 600)
+                                           -v: verbose output; prints status report at end
+  checkInitDns <FQDN>                      - checks if initial DNS record has been propagated
+  -h|--help                                - pulls up this help page
+Available providers:
+
+(This file is read by the `fqdnmgr` script. The script will append the
+available providers list when printing usage.)
