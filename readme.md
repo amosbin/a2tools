@@ -40,6 +40,35 @@ git clone https://github.com/TBAIKamine/a2tools.git .
 bash ./setup.sh
 ```
 
+## Docker image publish (multi-arch)
+
+To publish `latest` so both x86_64 servers and ARM hosts can pull it, use Buildx with explicit platforms:
+
+```bash
+chmod +x ./Docker/publish.sh
+./Docker/publish.sh aminetbaik/a2tools latest
+```
+
+By default this publishes:
+- `linux/amd64`
+- `linux/amd64/v3`
+- `linux/arm64`
+
+Note: if your local Buildx builder does not support `linux/amd64/v3`, the script exits with a clear error.
+To publish a fallback set on such builders, use:
+
+```bash
+ALLOW_PLATFORM_FALLBACK=1 ./Docker/publish.sh aminetbaik/a2tools latest
+```
+
+That fallback publishes `linux/amd64` and `linux/arm64`.
+
+You can override platforms if needed:
+
+```bash
+PLATFORMS='linux/amd64,linux/amd64/v3,linux/arm64' ./Docker/publish.sh aminetbaik/a2tools latest
+```
+
 ## Supported registrars
 - [namecheap.com](https://www.namecheap.com)
 - [wedos.com](https://www.wedos.com)
