@@ -1,0 +1,29 @@
+Usage: a2sitemgr <FQDN> [options]
+
+Description:
+  Configure Apache virtual hosts with thre possible modes: domain (standard), proxypass(useful for exposing containers), subdomain wildcard(useful for making a subdomain available to all domains).
+
+Options (all modes):
+  -m, --mode <domain|pp|proxypass|swc|subdomainWildCard>
+  -d, --fqdn <FQDN>                : Fully-qualified domain name to manage.
+                                      A positional FQDN argument is accepted too.
+                                    : Operation mode. Default: `domain`.
+                                      `domain`    - standard vhost for a single FQDN
+                                      `pp`/`proxypass` - create a proxied subdomain (requires `-p`)
+                                      `swc`/`subdomainWildCard` - create a subdomain wildcard config (e.g. `subdomain.*`)
+  -r, --registrar <REGISTRAR>      : Registrar credential profile to use for DNS/cert actions.
+  --setInitDNSRecords              : Automatically set initial DNS records (A @, A *, MX @) via fqdnmgr.
+                                      Requires -r/--registrar. Can be combined with -o and --sync.
+  -o, --override                   : When used with --setInitDNSRecords, delete all existing DNS records
+                                      before setting the initial ones. Without this flag, existing records
+                                      are preserved and initial records are added/updated.
+  --sync                           : When used with --setInitDNSRecords, wait for DNS propagation before
+                                      continuing with certificate requests.
+  -ni, --non-interactive           : Non-interactive mode — accept defaults / overwrite prompts.
+  -c, --strict                     : Strict validation mode for registrar/name resolution.
+  -v, --verbose                    : Verbose output for debugging and status messages.
+  -h, --help                       : Show this usage help (the script reads `usage.txt` for help output).
+
+Options (proxypass modes):
+  -s, --secured                    : Use HTTPS when creating a proxypass target (sets proxy protocol to https).
+  -p, --port <PORT>                : Backend/proxy port (required for proxypass/pp mode).

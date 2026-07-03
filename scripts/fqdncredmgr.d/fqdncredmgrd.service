@@ -1,0 +1,18 @@
+[Unit]
+Description=FQDN Credentials Manager Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fqdncredmgrd
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=true
+ReadOnlyPaths=/
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target

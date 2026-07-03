@@ -1,0 +1,891 @@
+#!/bin/bash
+# Wedos.com DNS Provider Plugin
+
+PROVIDER_NAME="wedos.com"
+PROVIDER_API_BASE="https://api.wedos.com/wapi/json"
+
+# DNS propagation buffer (seconds to wait after Google DNS confirms)
+DNS_PROPAGATION_BUFFER=60
+
+## Expects `PROVIDER_USERNAME` and `PROVIDER_API_KEY` to be exported by the caller (provided by the credentials daemon)
+# Rate limiting (Wedos: 1000/hour)
+RATE_LIMIT_HOUR=1000
+RATE_LIMIT_BUFFER=5
+RATE_DB_PATH="/etc/fqdnmgr/providers/wedos.com-rate.db"
+DOMAINS_DB_PATH="/etc/fqdntools/domains.db"
+
+# Helper: get WAN_IP - reads from /etc/environment, errors if not set
+get_wan_ip() {
+    if [ -n "$WAN_IP" ]; then
+        export WAN_IP
+        return 0
+    fi
+    
+    if [ -f /etc/environment ]; then
+        WAN_IP=$(grep -E "^WAN_IP=" /etc/environment 2>/dev/null | cut -d= -f2 | tr -d '"')
+        if [ -n "$WAN_IP" ]; then
+            export WAN_IP
+            return 0
+        fi
+    fi
+    
+    echo "Error: WAN_IP not set in /etc/environment" >&2
+    return 1
+}
+
+# Check jq dependency
+check_jq() {
+    if ! command -v jq &>/dev/null; then
+        echo "Error: jq is required but not installed" >&2
+        exit 1
+    fi
+}
+check_jq
+
+# Initialize rate limit database
+init_rate_db() {
+    if [ ! -f "$RATE_DB_PATH" ]; then
+        sqlite3 "$RATE_DB_PATH" "CREATE TABLE IF NOT EXISTS api_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL);"
+        chmod 0640 "$RATE_DB_PATH"
+        chown root:root "$RATE_DB_PATH" 2>/dev/null || true
+    fi
+}
+
+record_api_call() {
+    local now=$(date +%s)
+    local cutoff=$((now - 3600))
+    init_rate_db
+    sqlite3 "$RATE_DB_PATH" "BEGIN TRANSACTION; DELETE FROM api_calls WHERE timestamp < $cutoff; INSERT INTO api_calls (timestamp) VALUES ($now); COMMIT;"
+}
+
+get_requests_in_window() {
+    local now=$(date +%s)
+    local cutoff=$((now - 3600))
+    init_rate_db
+    local count=$(sqlite3 "$RATE_DB_PATH" "SELECT COUNT(*) FROM api_calls WHERE timestamp >= $cutoff;" 2>/dev/null)
+    echo "${count:-0}"
+}
+
+get_available_slots() {
+    local reqs=$(get_requests_in_window)
+    local avail=$((RATE_LIMIT_HOUR - reqs))
+    [ $avail -lt 0 ] && avail=0
+    echo "$avail"
+}
+
+get_wait_time() {
+    local avail=$(get_available_slots)
+    if [ "$avail" -gt 0 ]; then
+        echo "0"
+        return 0
+    fi
+    local now=$(date +%s)
+    local oldest=$(sqlite3 "$RATE_DB_PATH" "SELECT MIN(timestamp) FROM api_calls WHERE timestamp >= $((now - 3600));" 2>/dev/null)
+    if [ -n "$oldest" ]; then
+        local wait=$((oldest + 3600 - now + RATE_LIMIT_BUFFER))
+        [ $wait -le 0 ] && wait=$RATE_LIMIT_BUFFER
+        echo "$wait"
+    else
+        echo "$RATE_LIMIT_BUFFER"
+    fi
+}
+
+# Generate auth string: SHA1(user + SHA1(wapi_password) + hour_prague)
+generate_auth() {
+    local user="$PROVIDER_USERNAME"
+    local pass="$PROVIDER_API_KEY"  # This is the WAPI password
+    # Get current hour in Europe/Prague timezone
+    local hour=$(TZ='Europe/Prague' date '+%H')
+    local pass_hash=$(echo -n "$pass" | sha1sum | cut -d' ' -f1)
+    local auth_string="${user}${pass_hash}${hour}"
+    echo -n "$auth_string" | sha1sum | cut -d' ' -f1
+}
+
+# Build JSON request payload
+build_request_json() {
+    local command="$1"
+    local data="${2:-null}"  # JSON object or null
+    local clTRID="${3:-}"
+    
+    local auth=$(generate_auth)
+    local json
+    if [ "$data" = "null" ]; then
+        json=$(jq -n --arg user "$PROVIDER_USERNAME" --arg auth "$auth" --arg cmd "$command" \
+            '{request: {user: $user, auth: $auth, command: $cmd}}')
+    else
+        json=$(jq -n --arg user "$PROVIDER_USERNAME" --arg auth "$auth" --arg cmd "$command" --argjson data "$data" \
+            '{request: {user: $user, auth: $auth, command: $cmd, data: $data}}')
+    fi
+    [ -n "$clTRID" ] && json=$(echo "$json" | jq --arg id "$clTRID" '.request.clTRID = $id')
+    echo "$json"
+}
+
+# API POST request (Wedos only uses POST)
+api_request() {
+    local command="$1"
+    local data="${2:-null}"
+    
+    record_api_call
+    
+    local json=$(build_request_json "$command" "$data")
+    local encoded=$(echo "$json" | jq -sRr @uri)
+    
+    # Log the request (mask auth for security)
+    local masked_json
+    masked_json=$(echo "$json" | jq '.request.auth = "***MASKED***"')
+    log_request "$PROVIDER_NAME" "curl -s -X POST \"$PROVIDER_API_BASE\" -H \"Content-Type: application/x-www-form-urlencoded\" -d \"request=$masked_json\""
+    
+    API_RESPONSE=$(curl -s -X POST "$PROVIDER_API_BASE" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "request=$encoded" \
+        --max-time 60)
+    local curl_status=$?
+    
+    # Log the response
+    log_response "$PROVIDER_NAME" "$API_RESPONSE"
+    
+    echo "$API_RESPONSE"
+    return $curl_status
+}
+
+# Check API response for errors (code != 1000, 1001, 1002, 1003)
+check_api_error() {
+    local response="$1"
+    local operation="${2:-API operation}"
+    
+    local code=$(echo "$response" | jq -r '.response.code // empty' 2>/dev/null)
+    if [ -z "$code" ]; then
+        echo "Error: $operation - Invalid response" >&2
+        return 1
+    fi
+    
+    # Success codes: 1000=OK, 1001=Pending, 1002=Notification acquired, 1003=Empty queue
+    case "$code" in
+        1000|1001|1002|1003) return 0 ;;
+        *)
+            local result=$(echo "$response" | jq -r '.response.result // "Unknown error"' 2>/dev/null)
+            echo "Error: $operation - Code $code: $result" >&2
+            return 1
+            ;;
+    esac
+}
+
+# --- Provider Interface Functions ---
+
+provider_get_domain_list() {
+    local wan_ip="$1"
+    
+    local response=$(api_request "domains-list")
+    if ! check_api_error "$response" "Get domain list"; then
+        return 1
+    fi
+    
+    # Extract domain names from response
+    DOMAIN_LIST=$(echo "$response" | jq -r '.response.data.domain | to_entries[] | .value.name' 2>/dev/null)
+    
+    if [ -z "$DOMAIN_LIST" ]; then
+        echo "Error: No domains found in Wedos account" >&2
+        return 1
+    fi
+}
+
+provider_check_domain_status() {
+    local domain="$1"
+    local wan_ip="$2"
+    
+    # Logic per decision table:
+    # 1. Use domains-list with filter "active" - if domain is in list, status is "owned"
+    # 2. If not in list, use domain-check:
+    #    - Code 1000 => "free"
+    #    - Any other code => "taken"
+    
+    # Step 1: Check if domain is in our account using domains-list with status=active
+    local list_data=$(jq -n '{status: "active"}')
+    local list_response=$(api_request "domains-list" "$list_data")
+    
+    if check_api_error "$list_response" "Get domain list (check status)" 2>/dev/null; then
+        # Check if domain is in the list
+        local found
+        found=$(echo "$list_response" | jq -r --arg d "$domain" '.response.data.domain | to_entries[] | select(.value.name == $d) | .value.name' 2>/dev/null)
+        
+        if [ -n "$found" ]; then
+            echo "status=owned"
+            return 0
+        fi
+    fi
+    
+    # Step 2: Domain not in our list - use domain-check to determine availability
+    local check_data=$(jq -n --arg name "$domain" '{name: $name}')
+    local check_response=$(api_request "domain-check" "$check_data")
+    local code=$(echo "$check_response" | jq -r '.response.code // empty' 2>/dev/null)
+    
+    case "$code" in
+        1000)
+            # Domain is available for registration
+            echo "status=free"
+            ;;
+        *)
+            # Any other code means the domain is NOT available (taken)
+            echo "status=taken"
+            ;;
+    esac
+    return 0
+}
+
+provider_get_dns_records() {
+    local domain="$1"
+    local wan_ip="$2"
+    
+    local data=$(jq -n --arg domain "$domain" '{domain: $domain}')
+    local response=$(api_request "dns-rows-list" "$data")
+    
+    if ! check_api_error "$response" "Get DNS records"; then
+        return 1
+    fi
+    
+    # Parse records into format: name|type|address|ttl|mxpref
+    # Wedos returns: ID, name, ttl, rdtype, rdata
+    # For MX records, rdata contains "priority mailserver"
+    PARSED_RECORDS=""
+    DNS_ROW_IDS=""  # Store row IDs for later operations
+    
+    local rows=$(echo "$response" | jq -r '.response.data.row // [] | .[] | "\(.ID)|\(.name)|\(.rdtype)|\(.rdata)|\(.ttl)"' 2>/dev/null)
+    
+    while IFS='|' read -r row_id name rdtype rdata ttl; do
+        [ -z "$row_id" ] && continue
+        
+        local mxpref=""
+        local address="$rdata"
+        
+        # For MX records, extract priority from rdata (format: "10 mail.domain.com")
+        if [ "$rdtype" = "MX" ]; then
+            mxpref=$(echo "$rdata" | awk '{print $1}')
+            address=$(echo "$rdata" | awk '{print $2}')
+        fi
+        
+        # Convert empty name to @ for compatibility
+        [ -z "$name" ] && name="@"
+        
+        PARSED_RECORDS="${PARSED_RECORDS}${name}|${rdtype}|${address}|${ttl}|${mxpref}\n"
+        DNS_ROW_IDS="${DNS_ROW_IDS}${row_id}|${name}|${rdtype}|${address}\n"
+    done <<< "$rows"
+}
+
+provider_set_dns_records() {
+    local domain="$1"
+    local wan_ip="$2"
+    local parsed_records="$3"
+    local include_acme_challenge="$4"
+    local acme_value="$5"
+    local exclude_acme_token="${6:-}"
+    
+    # ACME cleanup mode - remove challenge record and return immediately
+    if [ -n "$exclude_acme_token" ]; then
+        provider_get_dns_records "$domain" "$wan_ip"
+        local row_id=$(echo -e "$DNS_ROW_IDS" | grep "_acme-challenge|TXT|$exclude_acme_token" | cut -d'|' -f1)
+        if [ -n "$row_id" ]; then
+            local data=$(jq -n --arg domain "$domain" --arg row_id "$row_id" '{domain: $domain, row_id: $row_id}')
+            local response=$(api_request "dns-row-delete" "$data")
+            check_api_error "$response" "Delete ACME challenge record" || true
+            local commit_data=$(jq -n --arg name "$domain" '{name: $name}')
+            api_request "dns-domain-commit" "$commit_data" >/dev/null 2>&1
+        fi
+        return 0
+    fi
+    
+    # ACME challenge mode - add challenge record and return immediately
+    if [ "$include_acme_challenge" = "true" ] && [ -n "$acme_value" ]; then
+        local data=$(jq -n --arg domain "$domain" --arg name "_acme-challenge" --arg rdata "$acme_value" \
+            '{domain: $domain, name: $name, ttl: "300", type: "TXT", rdata: $rdata}')
+        local response=$(api_request "dns-row-add" "$data")
+        if ! check_api_error "$response" "Add ACME challenge record"; then
+            return 1
+        fi
+        local commit_data=$(jq -n --arg name "$domain" '{name: $name}')
+        api_request "dns-domain-commit" "$commit_data" >/dev/null 2>&1
+        return 0
+    fi
+    
+    return 0
+}
+
+provider_certify() {
+    local domain="$1"
+    local validation_token="$2"
+    local wan_ip="$3"
+    
+    # Add _acme-challenge TXT record
+    provider_set_dns_records "$domain" "$wan_ip" "" "true" "$validation_token"
+}
+
+provider_cleanup() {
+    local domain="$1"
+    local validation_token="$2"
+    local wan_ip="$3"
+    
+    # Remove _acme-challenge TXT record
+    provider_set_dns_records "$domain" "$wan_ip" "" "false" "" "$validation_token"
+}
+
+provider_set_init_dns_records() {
+    local domain="$1"
+    local wan_ip="$2"
+    local ttl="${3:-300}"
+    local override_mode="$4"  # "override" to delete all existing records
+    
+    # First, ensure domain exists in WEDOS DNS
+    local dns_data=$(jq -n --arg name "$domain" '{name: $name}')
+    local dns_check=$(api_request "dns-domain-info" "$dns_data")
+    local dns_code=$(echo "$dns_check" | jq -r '.response.code // empty' 2>/dev/null)
+    
+    if [ "$dns_code" != "1000" ]; then
+        # Add domain to DNS
+        local add_response=$(api_request "dns-domain-add" "$dns_data")
+        if ! check_api_error "$add_response" "Add domain to DNS"; then
+            return 1
+        fi
+    fi
+    
+    # Get existing records
+    provider_get_dns_records "$domain" "$wan_ip"
+    
+    if [ "$override_mode" = "override" ]; then
+        # Override mode: delete ALL existing records
+        while IFS='|' read -r row_id name rdtype rdata; do
+            [ -z "$row_id" ] && continue
+            local del_data=$(jq -n --arg domain "$domain" --arg row_id "$row_id" '{domain: $domain, row_id: $row_id}')
+            api_request "dns-row-delete" "$del_data" >/dev/null 2>&1
+        done <<< "$(echo -e "$DNS_ROW_IDS")"
+    else
+        # Non-override mode: only delete init records (A @, A *, MX @) to avoid duplicates
+        while IFS='|' read -r row_id name rdtype rdata; do
+            [ -z "$row_id" ] && continue
+            # Convert @ to empty string for comparison (Wedos uses empty string for root)
+            local cmp_name="$name"
+            [ "$cmp_name" = "@" ] && cmp_name=""
+            
+            # Delete only init records: A @ (empty), A *, MX @ (empty)
+            local should_delete=false
+            if [ "$rdtype" = "A" ] && [ "$cmp_name" = "" ]; then
+                should_delete=true
+            elif [ "$rdtype" = "A" ] && [ "$cmp_name" = "*" ]; then
+                should_delete=true
+            elif [ "$rdtype" = "MX" ] && [ "$cmp_name" = "" ]; then
+                should_delete=true
+            fi
+            
+            if [ "$should_delete" = true ]; then
+                local del_data=$(jq -n --arg domain "$domain" --arg row_id "$row_id" '{domain: $domain, row_id: $row_id}')
+                api_request "dns-row-delete" "$del_data" >/dev/null 2>&1
+            fi
+        done <<< "$(echo -e "$DNS_ROW_IDS")"
+    fi
+    
+    # Add A record for @
+    local a_root=$(jq -n --arg domain "$domain" --arg rdata "$wan_ip" \
+        '{domain: $domain, name: "", ttl: 300, type: "A", rdata: $rdata}')
+    api_request "dns-row-add" "$a_root" >/dev/null
+    
+    # Add A record for *
+    local a_wildcard=$(jq -n --arg domain "$domain" --arg rdata "$wan_ip" \
+        '{domain: $domain, name: "*", ttl: 300, type: "A", rdata: $rdata}')
+    api_request "dns-row-add" "$a_wildcard" >/dev/null
+    
+    # Add MX record for @ (priority 10)
+    local mx_data=$(jq -n --arg domain "$domain" --arg rdata "10 mail.${domain}." \
+        '{domain: $domain, name: "", ttl: 300, type: "MX", rdata: $rdata}')
+    api_request "dns-row-add" "$mx_data" >/dev/null
+    
+    # Commit changes
+    local commit_data=$(jq -n --arg name "$domain" '{name: $name}')
+    local commit_response=$(api_request "dns-domain-commit" "$commit_data")
+    
+    if check_api_error "$commit_response" "Commit DNS changes"; then
+        vecho "Success: Initial DNS records set for $domain"
+        vecho "  A    @  -> $wan_ip (TTL: ${ttl}s)"
+        vecho "  A    *  -> $wan_ip (TTL: ${ttl}s)"
+        vecho "  MX   @  -> mail.$domain (Priority: 10, TTL: ${ttl}s)"
+        if [ "$override_mode" = "override" ]; then
+            vecho "  (override mode: existing records were deleted)"
+        else
+            vecho "  (merge mode: existing records were preserved)"
+        fi
+        return 0
+    else
+        return 1
+    fi
+}
+
+provider_check_availability() {
+    local domain="$1"
+    local wan_ip="$2"
+    
+    local data=$(jq -n --arg name "$domain" '{name: $name}')
+    local response=$(api_request "domain-check" "$data")
+    local code=$(echo "$response" | jq -r '.response.code // empty' 2>/dev/null)
+    
+    case "$code" in
+        1000) echo "available" ;;
+        3201) echo "unavailable" ;;  # Domain is registered
+        3204) echo "unavailable" ;;  # Quarantined
+        3205) echo "unavailable" ;;  # Reserved
+        3206) echo "unavailable" ;;  # Blocked
+        *) echo "unavailable" ;;
+    esac
+    return 0
+}
+
+provider_get_balance() {
+    local wan_ip="$1"
+    
+    local response=$(api_request "credit-info")
+    if ! check_api_error "$response" "Get balance"; then
+        echo "-1"
+        return 1
+    fi
+    
+    local amount=$(echo "$response" | jq -r '.response.data.amount // "-1"' 2>/dev/null)
+    echo "$amount"
+    return 0
+}
+
+DOMAIN_CONF="/etc/fqdnmgr/domain.conf"
+
+load_domain_config() {
+    if [ ! -f "$DOMAIN_CONF" ]; then
+        echo "Error: Domain config file $DOMAIN_CONF not found" >&2
+        return 2
+    fi
+    source "$DOMAIN_CONF"
+    if [ -z "$FIRST_NAME" ] || [ -z "$LAST_NAME" ] || [ -z "$ADDRESS1" ] || \
+       [ -z "$CITY" ] || [ -z "$STATE_PROVINCE" ] || [ -z "$POSTAL_CODE" ] || \
+       [ -z "$COUNTRY" ] || [ -z "$PHONE" ] || [ -z "$EMAIL" ]; then
+        echo "Error: Missing required fields in $DOMAIN_CONF" >&2
+        return 2
+    fi
+}
+
+provider_purchase() {
+    local domain="$1"
+    
+    load_domain_config || return 2
+    
+    # Check availability first
+    if ! get_wan_ip; then
+        return 2
+    fi
+    local wan_ip="$WAN_IP"
+    local availability=$(provider_check_availability "$domain" "$wan_ip")
+    if [ "$availability" != "available" ]; then
+        echo "Error: Domain $domain is not available" >&2
+        return 2
+    fi
+    
+    # Create contact for CZ domain
+    # Convert phone format from +NNN.NNNNNNNNNN to +NNN NNNNNNNNNN (Wedos requirement)
+    local phone_wedos=$(echo "$PHONE" | sed 's/\./ /')
+    
+    # Build base contact data
+    local contact_data=$(jq -n \
+        --arg fname "$FIRST_NAME" \
+        --arg lname "$LAST_NAME" \
+        --arg email "$EMAIL" \
+        --arg phone "$phone_wedos" \
+        --arg addr_street "$ADDRESS1" \
+        --arg addr_city "$CITY" \
+        --arg addr_zip "$POSTAL_CODE" \
+        --arg addr_country "$COUNTRY" \
+        --arg addr_state "${STATE_PROVINCE:-}" \
+        '{
+            tld: "cz",
+            contact: {
+                fname: $fname,
+                lname: $lname,
+                email: $email,
+                phone: $phone,
+                addr_street: $addr_street,
+                addr_city: $addr_city,
+                addr_zip: $addr_zip,
+                addr_country: $addr_country
+            }
+        } | if $addr_state != "" then .contact.addr_state = $addr_state else . end')
+    
+    # Apply privacy settings logic
+    if [ "${WEDOS_PRIVACY:-}" = "1" ]; then
+        # Privacy mode: hide all contact information
+        contact_data=$(echo "$contact_data" | jq '.contact.disclose_phone = "1" | 
+                                                     .contact.disclose_fax = "1" | 
+                                                     .contact.disclose_email = "1" | 
+                                                     .contact.disclose_ident = "1" | 
+                                                     .contact.disclose_notify_email = "1" | 
+                                                     .contact.disclose_name = "1" | 
+                                                     .contact.disclose_org = "1" | 
+                                                     .contact.disclose_addr = "1"')
+    elif [ "${WEDOS_PRIVACY:-}" = "0" ]; then
+        # Public mode: do not send any disclose_* fields (omit them entirely)
+        # contact_data already built without disclose_* fields, no action needed
+        :
+    else
+        # Individual mode: use per-field settings from config
+        [ -n "${disclose_phone:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_phone" '.contact.disclose_phone = $val')
+        [ -n "${disclose_fax:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_fax" '.contact.disclose_fax = $val')
+        [ -n "${disclose_email:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_email" '.contact.disclose_email = $val')
+        [ -n "${disclose_ident:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_ident" '.contact.disclose_ident = $val')
+        [ -n "${disclose_notify_email:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_notify_email" '.contact.disclose_notify_email = $val')
+        [ -n "${disclose_name:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_name" '.contact.disclose_name = $val')
+        [ -n "${disclose_org:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_org" '.contact.disclose_org = $val')
+        [ -n "${disclose_addr:-}" ] && contact_data=$(echo "$contact_data" | jq --arg val "$disclose_addr" '.contact.disclose_addr = $val')
+    fi
+    
+    local contact_response=$(api_request "contact-create" "$contact_data")
+    local contact_code=$(echo "$contact_response" | jq -r '.response.code // empty' 2>/dev/null)
+    
+    if [ "$contact_code" != "1000" ]; then
+        local result=$(echo "$contact_response" | jq -r '.response.result // "Unknown error"' 2>/dev/null)
+        echo "Error: Failed to create contact - $result" >&2
+        echo "$(date): purchase $domain - Contact creation failed: $result" >> "$LOG_FILE"
+        return 2
+    fi
+    
+    local owner_c=$(echo "$contact_response" | jq -r '.response.data.cname' 2>/dev/null)
+    
+    # Register domain
+    local years="${YEARS:-1}"
+    local nsset="${WEDOS_NSSET:-WEDOS}"
+    local domain_data=$(jq -n \
+        --arg name "$domain" \
+        --arg period "$years" \
+        --arg nsset "$nsset" \
+        --arg owner_c "$owner_c" \
+        --arg fname "$FIRST_NAME" \
+        --arg lname "$LAST_NAME" \
+        '{
+            name: $name,
+            period: $period,
+            nsset: $nsset,
+            owner_c: $owner_c,
+            rules: {
+                fname: $fname,
+                lname: $lname
+            }
+        }')
+    
+    local domain_response=$(api_request "domain-create" "$domain_data")
+    local domain_code=$(echo "$domain_response" | jq -r '.response.code // empty' 2>/dev/null)
+    
+    case "$domain_code" in
+        1000|1001)
+            echo "Success: Domain $domain registered"
+            return 0
+            ;;
+        3002)
+            echo "Error: Insufficient credit" >&2
+            return 1
+            ;;
+        *)
+            local result=$(echo "$domain_response" | jq -r '.response.result // "Unknown error"' 2>/dev/null)
+            echo "Error: Domain registration failed - $result" >&2
+            echo "$(date): purchase $domain - $result" >> "$LOG_FILE"
+            return 2
+            ;;
+    esac
+}
+
+provider_list_all_domains() {
+    local wan_ip="$1"
+    
+    if [ -z "$wan_ip" ]; then
+        echo "Error: WAN IP is required" >&2
+        return 1
+    fi
+    
+    # Get active domains
+    local data=$(jq -n '{status: "active"}')
+    local response=$(api_request "domains-list" "$data")
+    
+    if ! check_api_error "$response" "Get domain list"; then
+        return 1
+    fi
+    
+    # Extract all domain names
+    local domains=$(echo "$response" | jq -r '.response.data.domain | to_entries[] | .value.name' 2>/dev/null)
+    
+    if [ -z "$domains" ]; then
+        echo "No owned domains found"
+        return 0
+    fi
+    
+    # Emit machine-parsable lines: domain|status (domains-list was filtered by status=active)
+    while IFS= read -r domain; do
+        [ -z "$domain" ] && continue
+        # domains-list was queried for status=active, so report status 'active'
+        printf "%s|active\n" "$domain"
+    done <<< "$domains"
+    
+    return 0
+}
+
+provider_list_owned_domains() {
+    local wan_ip="$1"
+    local override_mode="$2"  # "override" to show override indicator
+    
+    OWNED_DOMAINS_LIST=()
+    
+    # Get active domains
+    local data=$(jq -n '{status: "active"}')
+    local response=$(api_request "domains-list" "$data")
+    
+    if ! check_api_error "$response" "Get domain list"; then
+        return 1
+    fi
+    
+    # Extract all domain names
+    local domains=$(echo "$response" | jq -r '.response.data.domain | to_entries[] | .value.name' 2>/dev/null)
+    
+    if [ -z "$domains" ]; then
+        echo "No owned domains found" >&2
+        return 1
+    fi
+    
+    # Populate OWNED_DOMAINS_LIST and present to user, but DO NOT write to DB here.
+    while IFS= read -r domain; do
+        [ -z "$domain" ] && continue
+
+        OWNED_DOMAINS_LIST+=("$domain")
+
+        # Show dns_init status indicator (read-only DB query)
+        local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$domain';" 2>/dev/null)
+        if [ "$dns_init" = "1" ]; then
+            if [ "$override_mode" = "override" ]; then
+                echo "$domain [DNS initialized - will override]"
+            else
+                echo "$domain [DNS initialized]"
+            fi
+        else
+            echo "$domain"
+        fi
+    done <<< "$domains"
+    
+    if [ ${#OWNED_DOMAINS_LIST[@]} -eq 0 ]; then
+        echo "No domains found" >&2
+        return 1
+    fi
+    
+    return 0
+}
+
+parse_domain_selection() {
+    local selection="$1"
+    local max_idx="$2"
+    SELECTED_INDICES=()
+    
+    if [ -z "$selection" ] || [ "$selection" = "all" ]; then
+        for ((i=0; i<max_idx; i++)); do
+            SELECTED_INDICES+=($i)
+        done
+        return 0
+    fi
+    
+    IFS=',' read -ra parts <<< "$selection"
+    for part in "${parts[@]}"; do
+        part=$(echo "$part" | tr -d ' ')
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            local start="${BASH_REMATCH[1]}"
+            local end="${BASH_REMATCH[2]}"
+            for ((i=start; i<=end; i++)); do
+                if [ $i -ge 1 ] && [ $i -le $max_idx ]; then
+                    SELECTED_INDICES+=($((i - 1)))
+                fi
+            done
+        elif [[ "$part" =~ ^[0-9]+$ ]]; then
+            if [ "$part" -ge 1 ] && [ "$part" -le $max_idx ]; then
+                SELECTED_INDICES+=($((part - 1)))
+            fi
+        fi
+    done
+    
+    SELECTED_INDICES=($(printf '%s\n' "${SELECTED_INDICES[@]}" | sort -nu))
+    return 0
+}
+
+# Helper: Wait for DNS propagation for a single domain
+# Uses adaptive timing based on historical propagation data
+# Returns 0 on success, 1 on timeout
+wait_for_domain_propagation() {
+    local domain="$1"
+    local wan_ip="$2"
+    local max_wait="${3:-600}"  # Default to 600 seconds (10 minutes) if not provided
+    local elapsed=0
+    
+    # Get the authoritative NS for adaptive timing
+    local ns_server
+    ns_server=$(get_cached_ns "$domain")
+    
+    # Get average propagation time for this NS
+    local avg_propagation
+    avg_propagation=$(get_avg_propagation_time "$ns_server" "wedos.com")
+    
+    # Track first check timestamp for adaptive timing
+    local first_check_ts
+    first_check_ts=$(date +%s)
+    
+    while [ $elapsed -lt $max_wait ]; do
+        # Check if DNS has propagated (using the centralized check function)
+        if check_init_dns_propagation "$domain" "$wan_ip" "$elapsed" 2>/dev/null; then
+            # Calculate actual propagation time and update average
+            local now_ts
+            now_ts=$(date +%s)
+            local actual_propagation=$((now_ts - first_check_ts))
+            update_avg_propagation_time "$ns_server" "$actual_propagation" 2>/dev/null || true
+            return 0
+        fi
+        
+        # Calculate next wait interval using adaptive timing
+        local wait_interval
+        wait_interval=$(calculate_next_wait "$ns_server" "$first_check_ts" 2>/dev/null || echo "10")
+        
+        # Ensure we don't exceed max_wait
+        if [ $((elapsed + wait_interval)) -gt $max_wait ]; then
+            wait_interval=$((max_wait - elapsed))
+            [ "$wait_interval" -le 0 ] && break
+        fi
+        
+        sleep $wait_interval
+        elapsed=$((elapsed + wait_interval))
+    done
+    
+    return 1  # Timeout
+}
+
+provider_set_all_domains_init_records() {
+    local wan_ip="$1"
+    local override_mode="$2"  # "override" to delete existing records
+    local sync_mode="$3"      # "sync" to wait for DNS propagation
+    local max_wait="${4:-600}"  # Default to 600 seconds if not provided
+    shift 4
+    local domains=("$@")
+    
+    if [ -z "$wan_ip" ]; then
+        echo "Error: WAN IP is required" >&2
+        return 2
+    fi
+    
+    if [ ${#domains[@]} -eq 0 ]; then
+        echo "Error: No domains specified" >&2
+        return 2
+    fi
+    
+    local total=${#domains[@]}
+    local completed=0
+    local remaining_domains=("${domains[@]}")
+    local successfully_set_domains=()
+    
+    vecho "Starting DNS initialization for $total domain(s)..."
+    if [ "$override_mode" = "override" ]; then
+        vecho "  (override mode: existing records will be deleted)"
+    fi
+    if [ "$sync_mode" = "sync" ]; then
+        vecho "  (sync mode: will check DNS propagation for all domains in parallel after setting)"
+    fi
+    
+    # ==========================================================================
+    # PHASE 1: Set DNS records for ALL domains (respecting rate limits)
+    # ==========================================================================
+    vecho ""
+    vecho "=== Phase 1: Setting DNS records ==="
+    
+    while [ ${#remaining_domains[@]} -gt 0 ]; do
+        local slots=$(get_available_slots)
+        
+        if [ "$slots" -le 0 ]; then
+            local wait_secs=$(get_wait_time)
+            if [ "$wait_secs" -gt 600 ]; then
+                echo ""
+                echo "Rate limit reached. Wait time exceeds 10 minutes ($wait_secs seconds)."
+                echo "Completed: $completed/$total domains"
+                echo "Remaining: ${#remaining_domains[@]} domain(s)"
+                echo ""
+                echo "To continue later, run:"
+                echo "  fqdnmgr initRecords wedos.com"
+                return 1
+            fi
+            vecho "Rate limit reached. Waiting ${wait_secs}s for next slot..."
+            sleep "$wait_secs"
+            continue
+        fi
+        
+        local batch_size=$slots
+        [ $batch_size -gt ${#remaining_domains[@]} ] && batch_size=${#remaining_domains[@]}
+        
+        for ((i=0; i<batch_size; i++)); do
+            local domain="${remaining_domains[0]}"
+            remaining_domains=("${remaining_domains[@]:1}")
+            
+            vecho "  Setting DNS for: $domain ($((completed + 1))/$total)"
+            
+            # Check if DNS records are already correctly set at authoritative NS
+            # This prevents corrupting propagation timing with near-0 measurements
+            local ns_server
+            ns_server=$(get_cached_ns "$domain" 2>/dev/null || echo "")
+            local dns_already_propagated=false
+            
+            if [ -n "$ns_server" ]; then
+                local a_root_check=$(dig +short @"$ns_server" "$domain" A 2>/dev/null)
+                local a_wildcard_check=$(dig +short @"$ns_server" "wildcard-test.${domain}" A 2>/dev/null)
+                local mx_check=$(dig +short @"$ns_server" "$domain" MX 2>/dev/null)
+                
+                if [ -n "$a_root_check" ] && echo "$a_root_check" | grep -q "$wan_ip" && \
+                   [ -n "$a_wildcard_check" ] && echo "$a_wildcard_check" | grep -q "$wan_ip" && \
+                   [ -n "$mx_check" ] && echo "$mx_check" | grep -q "mail.${domain}"; then
+                    dns_already_propagated=true
+                    vecho "    (records already propagated)"
+                fi
+            fi
+            
+            if provider_set_init_dns_records "$domain" "$wan_ip" "" "$override_mode" >/dev/null 2>&1; then
+                sqlite3 "$DOMAINS_DB_PATH" "UPDATE domains SET dns_init=1 WHERE domain='$domain';" 2>/dev/null
+                
+                # Only add to propagation check list if records weren't already propagated
+                if [ "$dns_already_propagated" != true ]; then
+                    successfully_set_domains+=("$domain")
+                fi
+                completed=$((completed + 1))
+            else
+                vecho "    Warning: Failed to set DNS for $domain"
+            fi
+        done
+        
+        vecho "  Progress: $completed/$total"
+    done
+    
+    vecho ""
+    vecho "Phase 1 complete: DNS records set for $completed/$total domain(s)"
+    
+    # ==========================================================================
+    # PHASE 2: Check propagation in parallel (if sync mode)
+    # ==========================================================================
+    if [ "$sync_mode" = "sync" ] && [ ${#successfully_set_domains[@]} -gt 0 ]; then
+        vecho ""
+        vecho "=== Phase 2: Checking DNS propagation (parallel) ==="
+        
+        # Call the parallel propagation checker from fqdnmgr.sh
+        if wait_for_dns_propagation_parallel "$wan_ip" "$max_wait" "${successfully_set_domains[@]}"; then
+            vecho "Propagation checks complete"
+            
+            # Phase 3: Update TTL for propagated domains
+            vecho ""
+            vecho "=== Phase 3: Updating TTL to production value (7200s) ==="
+            for domain in "${successfully_set_domains[@]}"; do
+                vecho "  Updating TTL for: $domain"
+                provider_set_init_dns_records "$domain" "$wan_ip" 7200 "$override_mode" >/dev/null 2>&1 || true
+            done
+            vecho "TTL update complete"
+        else
+            vecho "Warning: Some domains may not have propagated within timeout"
+        fi
+    fi
+    
+    vecho ""
+    vecho "DNS initialization complete: $completed/$total domain(s)"
+    return 0
+}

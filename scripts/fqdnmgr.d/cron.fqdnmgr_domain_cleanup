@@ -1,0 +1,5 @@
+#!/bin/sh
+# Wrapper placed into /etc/cron.weekly/ by the installer
+if [ -x /usr/local/bin/fqdnmgr.d/cleanup_domains.sh ]; then
+    /usr/local/bin/fqdnmgr.d/cleanup_domains.sh
+fi

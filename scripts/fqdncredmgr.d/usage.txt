@@ -1,0 +1,12 @@
+Usage: fqdncredmgr <action> [provider] [username] [-p <api_key>]
+
+Actions:
+  add <REGISTRAR> <username>        Set credentials (replaces existing if any)
+  update <REGISTRAR> <username>     Update existing credentials
+  delete <REGISTRAR>                Delete credentials for provider
+  list                              List stored providers and masked usernames
+
+Options:
+  -p <api_key>  Provide API key on the command line. If omitted, you will be prompted.
+
+Note: Each registrar can have only one set of credentials (one username).
