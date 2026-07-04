@@ -12,21 +12,33 @@ MODE="domain"
 IS_DOMAIN_SUBDOMAIN=false
 BASE_DOMAIN_CONF=""
 
-# Helper: get WAN_IP - reads from /etc/environment, falls back to curl, caches for system-wide access
+# Helper: get WAN_IP - reads from the process environment first, then the settings file, falls back to curl, caches for system-wide access
+WAN_IP_SETTINGS_FILE="${WAN_IP_SETTINGS_FILE:-/etc/environment}"
+
+read_wan_ip_from_settings() {
+    local settings_file="${1:-$WAN_IP_SETTINGS_FILE}"
+
+    if [ -f "$settings_file" ]; then
+        WAN_IP=$(grep -E "^WAN_IP=" "$settings_file" 2>/dev/null | cut -d= -f2 | tr -d '"')
+        if [ -n "$WAN_IP" ]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 get_wan_ip() {
     # Check if WAN_IP is already set in environment
-    if [ -n "$WAN_IP" ]; then
+    if [ -n "${WAN_IP:-}" ]; then
         export WAN_IP
         return 0
     fi
     
-    # Try to read from /etc/environment
-    if [ -f /etc/environment ]; then
-        WAN_IP=$(grep -E "^WAN_IP=" /etc/environment 2>/dev/null | cut -d= -f2 | tr -d '"')
-        if [ -n "$WAN_IP" ]; then
-            export WAN_IP
-            return 0
-        fi
+    # Try to read from the settings file
+    if read_wan_ip_from_settings; then
+        export WAN_IP
+        return 0
     fi
     
     # Fetch WAN IP from external service
@@ -37,12 +49,12 @@ get_wan_ip() {
         return 1
     fi
     
-    # Cache to /etc/environment for system-wide access (requires root)
+    # Cache to the settings file for system-wide access (requires root)
     if [ "$(id -u)" -eq 0 ]; then
-        if grep -q "^WAN_IP=" /etc/environment 2>/dev/null; then
-            sed -i "s|^WAN_IP=.*|WAN_IP=\"$WAN_IP\"|" /etc/environment
+        if grep -q "^WAN_IP=" "$WAN_IP_SETTINGS_FILE" 2>/dev/null; then
+            sed -i "s|^WAN_IP=.*|WAN_IP=\"$WAN_IP\"|" "$WAN_IP_SETTINGS_FILE"
         else
-            echo "WAN_IP=\"$WAN_IP\"" >> /etc/environment
+            echo "WAN_IP=\"$WAN_IP\"" >> "$WAN_IP_SETTINGS_FILE"
         fi
     fi
     

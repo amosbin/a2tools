@@ -508,24 +508,36 @@ is_valid_ipv4() {
     return 1
 }
 
-# Helper: get WAN_IP - reads from /etc/environment, errors if not set
+# Helper: get WAN_IP - reads from the process environment first, then the settings file, errors if not set
+WAN_IP_SETTINGS_FILE="${WAN_IP_SETTINGS_FILE:-/etc/environment}"
+
+read_wan_ip_from_settings() {
+    local settings_file="${1:-$WAN_IP_SETTINGS_FILE}"
+
+    if [ -f "$settings_file" ]; then
+        WAN_IP=$(grep -E "^WAN_IP=" "$settings_file" 2>/dev/null | cut -d= -f2 | tr -d '"')
+        if [ -n "$WAN_IP" ]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 get_wan_ip() {
     # Check if WAN_IP is already set in environment
-    if [ -n "$WAN_IP" ]; then
+    if [ -n "${WAN_IP:-}" ]; then
         export WAN_IP
         return 0
     fi
     
-    # Try to read from /etc/environment
-    if [ -f /etc/environment ]; then
-        WAN_IP=$(grep -E "^WAN_IP=" /etc/environment 2>/dev/null | cut -d= -f2 | tr -d '"')
-        if [ -n "$WAN_IP" ]; then
-            export WAN_IP
-            return 0
-        fi
+    # Try to read from the settings file
+    if read_wan_ip_from_settings; then
+        export WAN_IP
+        return 0
     fi
     
-    echo "Error: WAN_IP not set in /etc/environment. Please run setup first." >&2
+    echo "Error: WAN_IP not set in the environment or settings file. Please run setup first." >&2
     return 1
 }
 

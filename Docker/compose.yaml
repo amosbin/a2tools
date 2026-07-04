@@ -1,0 +1,32 @@
+services:
+  a2tools:
+    image: a2tools:latest
+    container_name: a2tools
+    restart: unless-stopped
+    env_file:
+      - ./data/.env
+    volumes:
+      # Required: databases (domains.db, creds.db)
+      - ./data/fqdntools:/etc/fqdntools
+
+      # Required: fqdnmgr config (domain.conf, providers, provider rate DBs)
+      - ./data/fqdnmgr:/etc/fqdnmgr
+
+      # Required: full certbot state (accounts, renewal, archive, live)
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/lib/letsencrypt:/var/lib/letsencrypt
+      - /var/log/letsencrypt:/var/log/letsencrypt
+
+      # Required for script logs and fqdn manager activity logs
+      - ./data/fqdnmgr-logs:/var/log/fqdnmgr
+      - ./data/apache-collector-logs:/var/log/apache-collector
+
+      # Recommended: preserve DNS/cache heuristics across restarts
+      - ./data/a2tools.cache:/tmp/a2tools.cache
+
+      # Recommended if you run a2sitemgr/a2wcrecalc in-container
+      - /etc/apache2/sites-available:/etc/apache2/sites-available
+      - /etc/apache2/sites-enabled:/etc/apache2/sites-enabled
+
+      # Optional: system-wide WAN_IP cache used by the scripts
+      - ./data/.env:/etc/environment
