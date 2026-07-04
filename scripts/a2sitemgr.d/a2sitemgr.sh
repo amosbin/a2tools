@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # source prerequisites
-. /usr/local/bin/getinput.d/getinput.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/a2sitemgr.d"
+. "$SCRIPT_DIR/../getinput.d/getinput.sh"
 
 # Disable errexit inherited from getinput.sh - we handle errors explicitly
 set +e
 
 # Initialize variables
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/a2sitemgr.d"
 MODE="domain"
 IS_DOMAIN_SUBDOMAIN=false
 BASE_DOMAIN_CONF=""
@@ -108,7 +108,7 @@ get_next_config_number() {
     local next_num=0
     while [ $next_num -le 9999 ]; do
         local padded=$(printf "%04d" $next_num)
-        if [[ ! -v used_numbers[$padded] ]]; then
+        if [ -z "${used_numbers[$padded]+x}" ]; then
             echo "${prefix}-${padded}-${name}.conf"
             return 0
         fi

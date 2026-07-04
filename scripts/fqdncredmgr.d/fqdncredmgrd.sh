@@ -89,7 +89,7 @@ handle_request() {
 main() {
     rm -f "$SOCKET_PATH"
     
-    socat UNIX-LISTEN:"$SOCKET_PATH",fork,mode=0600,user=root,group=root SYSTEM:'read request && /usr/local/bin/fqdncredmgrd handle "$request"'
+    socat UNIX-LISTEN:"$SOCKET_PATH",fork,mode=0600,user=root,group=root SYSTEM:'read request && /usr/bin/fqdncredmgrd handle "$request"'
 }
 
 case "$1" in

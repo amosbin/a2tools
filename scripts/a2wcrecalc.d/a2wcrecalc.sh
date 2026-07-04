@@ -45,7 +45,7 @@ get_next_swc_config_number() {
     local next_num=0
     while [ $next_num -le 9999 ]; do
         local padded=$(printf "%04d" $next_num)
-        if [[ ! -v used_numbers[$padded] ]]; then
+        if [ -z "${used_numbers[$padded]+x}" ]; then
             echo "${prefix}-${padded}-${name}.conf"
             return 0
         fi
