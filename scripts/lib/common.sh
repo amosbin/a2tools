@@ -139,11 +139,42 @@ is_valid_fqdn() {
 # ---------------------------------------------------------------------------
 # WAN IP
 # ---------------------------------------------------------------------------
-# Resolution order: process environment -> state file -> HTTPS lookup.
+# Resolution order: process environment -> state file -> public-IP lookup.
 # The fetched value is strictly validated as an IPv4 address before being
 # trusted or persisted. State lives in /var/lib/a2tools/wan_ip (root-only),
 # never in /etc/environment.
+#
+# Public-IP lookup prefers DNS-based reflectors (Cloudflare/Google)
+# over a plain HTTP endpoint: they reuse the already-required `dig` (dnsutils),
+# are a long-standing standard technique, and are harder to tamper with than an
+# arbitrary web service. The HTTPS endpoint is only a last-resort fallback and
+# stays overridable via WAN_IP_LOOKUP_URL.
 WAN_IP_LOOKUP_URL="${WAN_IP_LOOKUP_URL:-https://ifconfig.me/ip}"
+
+# Reflect our public IPv4 back via authoritative resolvers. Prints a validated
+# IPv4 on success (rc 0), nothing on failure (rc 1).
+_wan_ip_from_dns() {
+    command -v dig >/dev/null 2>&1 || return 1
+    local ip
+
+    # Cloudflare: CHAOS-class TXT reflector (value is quoted).
+    ip=$(dig -4 +short +time=3 +tries=1 CH TXT whoami.cloudflare @1.1.1.1 2>/dev/null | tr -d '"[:space:]')
+    if is_valid_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
+
+    # Google: TXT reflector on the public resolver (value is quoted).
+    ip=$(dig -4 +short +time=3 +tries=1 TXT o-o.myaddr.l.google.com @ns1.google.com 2>/dev/null | tr -d '"[:space:]')
+    if is_valid_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
+
+    return 1
+}
+
+# HTTPS fallback reflector. Prints a validated IPv4 on success, nothing on fail.
+_wan_ip_from_https() {
+    local ip
+    ip="$(curl -fsS --max-time 10 "$WAN_IP_LOOKUP_URL" 2>/dev/null | tr -d '[:space:]')"
+    if is_valid_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
+    return 1
+}
 
 get_wan_ip() {
     # 1) process environment
@@ -166,11 +197,11 @@ get_wan_ip() {
         WAN_IP=""
     fi
 
-    # 3) HTTPS lookup (validated)
-    WAN_IP="$(curl -fsS --max-time 10 "$WAN_IP_LOOKUP_URL" 2>/dev/null | tr -d '[:space:]')"
+    # 3) public-IP lookup: DNS-based reflectors first, HTTPS as last resort.
+    WAN_IP="$(_wan_ip_from_dns)" || WAN_IP="$(_wan_ip_from_https)" || WAN_IP=""
     if ! is_valid_ipv4 "$WAN_IP"; then
         WAN_IP=""
-        echo "Error: Failed to determine WAN IP (lookup via $WAN_IP_LOOKUP_URL failed or returned garbage)" >&2
+        echo "Error: Failed to determine WAN IP (DNS reflectors and HTTPS fallback $WAN_IP_LOOKUP_URL all failed or returned garbage)" >&2
         return 1
     fi
 
@@ -263,6 +294,26 @@ list_providers() {
     } | sort -u
 }
 
+# _provider_source_safe FILE: guard against loading a tampered plugin.
+# Provider plugins are sourced (executed) with the caller's privileges - root
+# in production - so a plugin that is group/world-writable, or owned by an
+# unexpected user, is a root code-execution vector. Accept files owned by root
+# OR by the current user (so the repo/dev checkout still works) and reject any
+# file writable by group or others. Requires GNU stat (Linux target).
+_provider_source_safe() {
+    local f="$1" meta uid mode
+    # GNU stat (Linux target) with a BSD stat fallback so the repo/dev checkout
+    # on macOS still works.
+    meta=$(stat -c '%u %a' "$f" 2>/dev/null) || meta=$(stat -f '%u %Lp' "$f" 2>/dev/null) || return 1
+    uid="${meta%% *}"
+    mode="${meta##* }"
+    [ -n "$uid" ] && [ -n "$mode" ] || return 1
+    [ "$uid" = "0" ] || [ "$uid" = "$(id -u)" ] || return 1
+    # 022 = group-write (020) | other-write (002); leading 0 forces octal.
+    [ $(( 0${mode} & 022 )) -eq 0 ] || return 1
+    return 0
+}
+
 # load_provider REGISTRAR: source the plugin into the current shell.
 load_provider() {
     local registrar="$1" pfile
@@ -270,6 +321,10 @@ load_provider() {
         echo "Error: Provider file not found for '$registrar'" >&2
         echo "Available providers:" >&2
         list_providers >&2
+        return 1
+    fi
+    if ! _provider_source_safe "$pfile"; then
+        echo "Error: Refusing to load provider '$registrar': '$pfile' must be owned by root (or you) and not group/world-writable." >&2
         return 1
     fi
     # shellcheck disable=SC1090

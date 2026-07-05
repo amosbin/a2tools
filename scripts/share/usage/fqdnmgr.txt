@@ -1,6 +1,6 @@
 Usage: fqdnmgr <function> [arguments...]
 Available functions:
-  check <FQDN> [REGISTRAR]               - Check domain status (free/owned/taken/unavailable)
+  check <FQDN> [REGISTRAR]               - Check domain status (free/owned/taken)
   purchase <FQDN> <REGISTRAR>            - Purchase a domain
   list [REGISTRAR] [local|remote]        - List domains: no args = all local (machine parsable)
                                            with REGISTRAR: local = query DB, remote = query API

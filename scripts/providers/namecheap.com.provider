@@ -19,6 +19,24 @@ RATE_LIMIT_BUFFER=5  # seconds buffer
 RATE_DB_PATH="${A2TOOLS_STATE:-/var/lib/a2tools}/namecheap.com-rate.db"
 DOMAINS_DB_PATH="${DOMAINS_DB_PATH:-/var/lib/a2tools/domains.db}"
 
+# Percent-encode a string per RFC 3986 for an x-www-form-urlencoded body.
+# Unreserved chars (A-Za-z0-9-._~) pass through; everything else becomes %HH.
+# Namecheap percent-decodes these fields server-side (its own API examples
+# encode e.g. address spaces as %20). NOTE: phone numbers must stay raw
+# (+NNN.NNNNNNNNNN) and must never be passed through this encoder.
+url_encode() {
+    local s="$1" out="" i c
+    local LC_ALL=C
+    for (( i=0; i<${#s}; i++ )); do
+        c="${s:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) out+="$c" ;;
+            *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # Initialize rate limit database if it doesn't exist
 init_rate_db() {
     if [ ! -f "$RATE_DB_PATH" ]; then
@@ -166,29 +184,6 @@ check_api_error() {
     if echo "$response" | grep -q 'Status="ERROR"'; then
         echo "Error: $operation failed:" 2>/dev/null
         echo "$response" | grep -o '<Error[^>]*>[^<]*</Error>' || echo "Unknown API error"
-        exit 1
-    fi
-}
-
-# Get domain list (sets `DOMAIN_LIST`)
-provider_get_domain_list() {
-    local wan_ip="$1"
-    
-    # Call Namecheap API to get domain list (POST-only)
-    API_RESPONSE=$(api_request "namecheap.domains.getList" "$wan_ip" "")
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to call Namecheap API" 2>/dev/null
-        exit 1
-    fi
-    
-    check_api_error "$API_RESPONSE" "Get domain list"
-    
-    # Extract domain names from XML response
-    DOMAIN_LIST=$(echo "$API_RESPONSE" | grep -o 'Name="[^"]*"' | sed 's/Name="//g' | sed 's/"//g')
-    
-    if [ -z "$DOMAIN_LIST" ]; then
-        echo "Error: No domains found in Namecheap account" 2>/dev/null
         exit 1
     fi
 }
@@ -544,29 +539,6 @@ provider_get_balance() {
 }
 
 # Purchase domain. Return codes: 0=success,1=insufficient funds,2=error
-# Pad phone number to meet Namecheap's format: +NNN.NNNNNNNNNN (min 10 digits after dot)
-# Input: phone number in format +NNN.NNNNNNN...
-# Output: padded phone number with leading zeros if needed
-pad_phone_for_namecheap() {
-    local phone="$1"
-    
-    # Extract country code and local number
-    if [[ "$phone" =~ ^\+([0-9]+)\.([0-9]+)$ ]]; then
-        local country_code="${BASH_REMATCH[1]}"
-        local local_number="${BASH_REMATCH[2]}"
-        
-        # Pad local number with leading zero if less than 10 digits
-        while [ ${#local_number} -lt 10 ]; do
-            local_number="0${local_number}"
-        done
-        
-        echo "+${country_code}.${local_number}"
-    else
-        # Return unchanged if format doesn't match
-        echo "$phone"
-    fi
-}
-
 provider_purchase() {
     local domain="$1"
     
@@ -605,16 +577,18 @@ provider_purchase() {
     local years="${YEARS:-1}"
     local params="&DomainName=${domain}&Years=${years}"
     
-    # Use raw values - curl --data will handle encoding
-    local fn="$FIRST_NAME"
-    local ln="$LAST_NAME"
-    local addr="$ADDRESS1"
-    local city="$CITY"
-    local state="$STATE_PROVINCE"
-    local postal="$POSTAL_CODE"
-    local country="$COUNTRY"
+    # Percent-encode free-text contact fields (Namecheap decodes them server
+    # side). The phone MUST stay raw: Namecheap expects +NNN.NNNNNNNNNN and
+    # rejects a percent-encoded '+'.
+    local fn=$(url_encode "$FIRST_NAME")
+    local ln=$(url_encode "$LAST_NAME")
+    local addr=$(url_encode "$ADDRESS1")
+    local city=$(url_encode "$CITY")
+    local state=$(url_encode "$STATE_PROVINCE")
+    local postal=$(url_encode "$POSTAL_CODE")
+    local country=$(url_encode "$COUNTRY")
     local phone="$PHONE"
-    local email="$EMAIL"
+    local email=$(url_encode "$EMAIL")
     
     # Add contact params for Registrant/Tech/Admin/AuxBilling
     for prefix in Registrant Tech Admin AuxBilling; do
@@ -630,7 +604,7 @@ provider_purchase() {
     done
     
     # Optional params
-    [ -n "$PROMOTION_CODE" ] && params="${params}&PromotionCode=${PROMOTION_CODE}"
+    [ -n "$PROMOTION_CODE" ] && params="${params}&PromotionCode=$(url_encode "$PROMOTION_CODE")"
     [ "$ADD_FREE_WHOISGUARD" = "yes" ] && params="${params}&AddFreeWhoisguard=yes"
     [ "$WG_ENABLED" = "yes" ] && params="${params}&WGEnabled=yes"
     
@@ -888,55 +862,6 @@ parse_domain_selection() {
     SELECTED_INDICES=($(printf '%s\n' "${SELECTED_INDICES[@]}" | sort -nu))
     
     return 0
-}
-
-# Helper: Wait for DNS propagation for a single domain
-# Uses adaptive timing based on historical propagation data
-# Returns 0 on success, 1 on timeout
-wait_for_domain_propagation() {
-    local domain="$1"
-    local wan_ip="$2"
-    local max_wait="${3:-600}"  # Default to 600 seconds (10 minutes) if not provided
-    local elapsed=0
-    
-    # Get the authoritative NS for adaptive timing
-    local ns_server
-    ns_server=$(get_cached_ns "$domain")
-    
-    # Get average propagation time for this NS
-    local avg_propagation
-    avg_propagation=$(get_avg_propagation_time "$ns_server" "namecheap.com")
-    
-    # Track first check timestamp for adaptive timing
-    local first_check_ts
-    first_check_ts=$(date +%s)
-    
-    while [ $elapsed -lt $max_wait ]; do
-        # Check if DNS has propagated (using the centralized check function)
-        if check_init_dns_propagation "$domain" "$wan_ip" "$elapsed" 2>/dev/null; then
-            # Calculate actual propagation time and update average
-            local now_ts
-            now_ts=$(date +%s)
-            local actual_propagation=$((now_ts - first_check_ts))
-            update_avg_propagation_time "$ns_server" "$actual_propagation" 2>/dev/null || true
-            return 0
-        fi
-        
-        # Calculate next wait interval using adaptive timing
-        local wait_interval
-        wait_interval=$(calculate_next_wait "$ns_server" "$first_check_ts" 2>/dev/null || echo "10")
-        
-        # Ensure we don't exceed max_wait
-        if [ $((elapsed + wait_interval)) -gt $max_wait ]; then
-            wait_interval=$((max_wait - elapsed))
-            [ "$wait_interval" -le 0 ] && break
-        fi
-        
-        sleep $wait_interval
-        elapsed=$((elapsed + wait_interval))
-    done
-    
-    return 1  # Timeout
 }
 
 # Batch initialize DNS with rate limiting. Params: $1=WAN_IP, $2=override_mode, $3+=domains

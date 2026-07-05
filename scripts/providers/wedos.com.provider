@@ -159,23 +159,6 @@ check_api_error() {
 
 # --- Provider Interface Functions ---
 
-provider_get_domain_list() {
-    local wan_ip="$1"
-    
-    local response=$(api_request "domains-list")
-    if ! check_api_error "$response" "Get domain list"; then
-        return 1
-    fi
-    
-    # Extract domain names from response
-    DOMAIN_LIST=$(echo "$response" | jq -r '.response.data.domain | to_entries[] | .value.name' 2>/dev/null)
-    
-    if [ -z "$DOMAIN_LIST" ]; then
-        echo "Error: No domains found in Wedos account" >&2
-        return 1
-    fi
-}
-
 provider_check_domain_status() {
     local domain="$1"
     local wan_ip="$2"
@@ -419,20 +402,6 @@ provider_check_availability() {
         3206) echo "unavailable" ;;  # Blocked
         *) echo "unavailable" ;;
     esac
-    return 0
-}
-
-provider_get_balance() {
-    local wan_ip="$1"
-    
-    local response=$(api_request "credit-info")
-    if ! check_api_error "$response" "Get balance"; then
-        echo "-1"
-        return 1
-    fi
-    
-    local amount=$(echo "$response" | jq -r '.response.data.amount // "-1"' 2>/dev/null)
-    echo "$amount"
     return 0
 }
 
@@ -693,55 +662,6 @@ parse_domain_selection() {
     
     SELECTED_INDICES=($(printf '%s\n' "${SELECTED_INDICES[@]}" | sort -nu))
     return 0
-}
-
-# Helper: Wait for DNS propagation for a single domain
-# Uses adaptive timing based on historical propagation data
-# Returns 0 on success, 1 on timeout
-wait_for_domain_propagation() {
-    local domain="$1"
-    local wan_ip="$2"
-    local max_wait="${3:-600}"  # Default to 600 seconds (10 minutes) if not provided
-    local elapsed=0
-    
-    # Get the authoritative NS for adaptive timing
-    local ns_server
-    ns_server=$(get_cached_ns "$domain")
-    
-    # Get average propagation time for this NS
-    local avg_propagation
-    avg_propagation=$(get_avg_propagation_time "$ns_server" "wedos.com")
-    
-    # Track first check timestamp for adaptive timing
-    local first_check_ts
-    first_check_ts=$(date +%s)
-    
-    while [ $elapsed -lt $max_wait ]; do
-        # Check if DNS has propagated (using the centralized check function)
-        if check_init_dns_propagation "$domain" "$wan_ip" "$elapsed" 2>/dev/null; then
-            # Calculate actual propagation time and update average
-            local now_ts
-            now_ts=$(date +%s)
-            local actual_propagation=$((now_ts - first_check_ts))
-            update_avg_propagation_time "$ns_server" "$actual_propagation" 2>/dev/null || true
-            return 0
-        fi
-        
-        # Calculate next wait interval using adaptive timing
-        local wait_interval
-        wait_interval=$(calculate_next_wait "$ns_server" "$first_check_ts" 2>/dev/null || echo "10")
-        
-        # Ensure we don't exceed max_wait
-        if [ $((elapsed + wait_interval)) -gt $max_wait ]; then
-            wait_interval=$((max_wait - elapsed))
-            [ "$wait_interval" -le 0 ] && break
-        fi
-        
-        sleep $wait_interval
-        elapsed=$((elapsed + wait_interval))
-    done
-    
-    return 1  # Timeout
 }
 
 provider_set_all_domains_init_records() {

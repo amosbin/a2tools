@@ -32,10 +32,14 @@ FQDN_BASE=""
 CERT_DOMAIN=""
 REGISTRAR=""
 NON_INTERACTIVE=false
-STRICT_MODE=false
 SET_INIT_DNS=false
 SET_INIT_DNS_OVERRIDE=false
 SET_INIT_DNS_SYNC=false
+
+# Config staging state (see the "atomic config staging" helpers below)
+CONF=""            # file that STEP 4 edits (a staging file for staged modes)
+CONF_FINAL=""      # final destination path for a staged config
+CONF_STAGED=false  # true when CONF is a staging file to be moved into place
 
 # Get next available config number for a given prefix (0 for swc, 1 for proxypass)
 # Returns the full filename: prefix-NNNN-name.conf
@@ -143,29 +147,53 @@ check_prerequisites() {
     fi
 }
 
-render_from_template_to_path() {
-    local tpl="$1" target="$2"
+# --- atomic config staging --------------------------------------------------
+# Vhost configs are assembled in a staging file inside sites-available (same
+# filesystem => atomic rename) and only moved into place once fully built. The
+# staging file is dot-prefixed and lacks a .conf suffix so Apache never
+# includes it. A backup of any overwritten destination allows rollback if the
+# post-enable config test fails.
+CONF_STAGING=""   # in-progress staging file (removed by the EXIT trap)
+CONF_BACKUP=""    # backup of an overwritten destination (for rollback)
 
-    # If the target exists, ask before overwriting.
-    if [ -f "$target" ]; then
-        local overwrite
-        vecho "Warning: $target already exists."
-        if [ "$NON_INTERACTIVE" = true ]; then
-            vecho "Non-interactive mode: auto-accepting default (overwrite)."
-            overwrite="Y"
-        else
-            overwrite=$(ask "Overwrite $target? [Y/n]:" "Y")
-        fi
-        case "$overwrite" in
-            [Nn]*)
-                vecho "Keeping existing $target. Exiting."
-                exit 0
-                ;;
-            *)
-                vecho "Overwriting $target"
-                ;;
-        esac
+cleanup_staging() {
+    [ -n "$CONF_STAGING" ] && rm -f "$CONF_STAGING" 2>/dev/null
+}
+trap cleanup_staging EXIT
+
+# Create a staging file in sites-available and echo its path.
+new_staging_conf() {
+    mktemp "/etc/apache2/sites-available/.a2tools.stage.XXXXXX"
+}
+
+# confirm_overwrite TARGET: if TARGET exists, honor the overwrite prompt
+# (auto-yes in non-interactive mode; declining ends the run cleanly).
+confirm_overwrite() {
+    local target="$1"
+    [ -f "$target" ] || return 0
+    local overwrite
+    vecho "Warning: $target already exists."
+    if [ "$NON_INTERACTIVE" = true ]; then
+        vecho "Non-interactive mode: auto-accepting default (overwrite)."
+        overwrite="Y"
+    else
+        overwrite=$(ask "Overwrite $target? [Y/n]:" "Y")
     fi
+    case "$overwrite" in
+        [Nn]*)
+            vecho "Keeping existing $target. Nothing to do."
+            exit 0
+            ;;
+        *)
+            vecho "Overwriting $target"
+            ;;
+    esac
+}
+
+# render_template TPL OUT: expand template placeholders for the current mode
+# into OUT (no prompts; OUT is normally a staging file).
+render_template() {
+    local tpl="$1" target="$2"
 
     # General substitutions (available in all modes)
     sed -e "s|{{FQDN}}|${FQDN:-}|g" "$tpl" > "$target"
@@ -213,7 +241,6 @@ do_config() {
                 RECURSIVE_ARGS=("$CERT_DOMAIN" -m domain)
                 [ -n "$REGISTRAR" ] && RECURSIVE_ARGS+=(-r "$REGISTRAR")
                 [ "$NON_INTERACTIVE" = true ] && RECURSIVE_ARGS+=(-ni)
-                [ "$STRICT_MODE" = true ] && RECURSIVE_ARGS+=(-c)
                 [ "$VERBOSE" = true ] && RECURSIVE_ARGS+=(-v)
                 [ "$SET_INIT_DNS" = true ] && RECURSIVE_ARGS+=(--setInitDNSRecords)
                 [ "$SET_INIT_DNS_OVERRIDE" = true ] && RECURSIVE_ARGS+=(-o)
@@ -230,17 +257,25 @@ do_config() {
                 fi
             fi
 
-            CONF="$BASE_DOMAIN_CONF"
+            CONF_FINAL="$BASE_DOMAIN_CONF"
+            CONF="$(new_staging_conf)"
+            CONF_STAGING="$CONF"
+            CONF_STAGED=true
+            cp "$BASE_DOMAIN_CONF" "$CONF"
         else
-            # Apex domain uses its own config file.
+            # Apex domain uses its own config file (staged, moved atomically).
             if [ ! -d "/var/www/$FQDN/public_html" ]; then
                 mkdir -p "/var/www/$FQDN/public_html"
                 mkdir -p "/var/www/$FQDN/log"
                 chown -R www-data:www-data "/var/www/$FQDN"
             fi
 
-            CONF="/etc/apache2/sites-available/${FQDN}.conf"
-            render_from_template_to_path "$TEMPLATES_DIR/init_standard.conf.tpl" "$CONF"
+            CONF_FINAL="/etc/apache2/sites-available/${FQDN}.conf"
+            confirm_overwrite "$CONF_FINAL"
+            CONF="$(new_staging_conf)"
+            CONF_STAGING="$CONF"
+            CONF_STAGED=true
+            render_template "$TEMPLATES_DIR/init_standard.conf.tpl" "$CONF"
         fi
 
         # Only call a2wcrecalc-dms if Docker-Mailserver is installed
@@ -268,7 +303,8 @@ do_config() {
 
         CONF_FILENAME=$(get_next_config_number "0" "$SUBDOMAIN")
         CONF="/etc/apache2/sites-available/${CONF_FILENAME}"
-        render_from_template_to_path "$TEMPLATES_DIR/swc_min.conf.tpl" "$CONF"
+        confirm_overwrite "$CONF"
+        render_template "$TEMPLATES_DIR/swc_min.conf.tpl" "$CONF"
 
         vecho "Created subdomain wildcard config: $CONF"
 
@@ -292,8 +328,12 @@ do_config() {
 
         # Full FQDN in the name avoids collisions between base domains.
         CONF_FILENAME=$(get_next_config_number "1" "$FQDN")
-        CONF="/etc/apache2/sites-available/${CONF_FILENAME}"
-        render_from_template_to_path "$TEMPLATES_DIR/init_proxypass.conf.tpl" "$CONF"
+        CONF_FINAL="/etc/apache2/sites-available/${CONF_FILENAME}"
+        confirm_overwrite "$CONF_FINAL"
+        CONF="$(new_staging_conf)"
+        CONF_STAGING="$CONF"
+        CONF_STAGED=true
+        render_template "$TEMPLATES_DIR/init_proxypass.conf.tpl" "$CONF"
         return 0
     fi
 }
@@ -313,7 +353,6 @@ while [[ $# -gt 0 ]]; do
         -p=*|--port=*) PROXY_PORT="${1#*=}"; shift ;;
         -p|--port)     PROXY_PORT="$2"; shift 2 ;;
         -ni|--non-interactive) NON_INTERACTIVE=true; shift ;;
-        -c|--strict)   STRICT_MODE=true; shift ;;
         -v|--verbose)  VERBOSE=true; shift ;;
         --setInitDNSRecords) SET_INIT_DNS=true; shift ;;
         -o|--override) SET_INIT_DNS_OVERRIDE=true; shift ;;
@@ -395,11 +434,6 @@ fi
 
 check_prerequisites
 
-# Ensure the centralized log directory exists
-mkdir -p /var/log/apache-collector
-chown root:adm /var/log/apache-collector
-chmod 750 /var/log/apache-collector
-
 if [ -z "$FQDN" ]; then
     echo "Error: FQDN is required" >&2
     exit 1
@@ -467,7 +501,6 @@ elif [ "$MODE" = "proxypass" ]; then
         RECURSIVE_ARGS=(-d "$CERT_DOMAIN" -m domain)
         [ -n "$REGISTRAR" ] && RECURSIVE_ARGS+=(-r "$REGISTRAR")
         [ "$NON_INTERACTIVE" = true ] && RECURSIVE_ARGS+=(-ni)
-        [ "$STRICT_MODE" = true ] && RECURSIVE_ARGS+=(-c)
         [ "$VERBOSE" = true ] && RECURSIVE_ARGS+=(-v)
 
         if ! "$0" "${RECURSIVE_ARGS[@]}"; then
@@ -497,7 +530,6 @@ if [ "$MODE" = "domain" ] || [ "$MODE" = "proxypass" ]; then
     else
         FQDNMGR_ARGS=(check "$TARGET_DOMAIN")
         [ -n "$REGISTRAR" ] && FQDNMGR_ARGS+=("$REGISTRAR")
-        [ "$STRICT_MODE" = true ] && FQDNMGR_ARGS+=("--strict")
         [ "$VERBOSE" = true ] && FQDNMGR_ARGS+=("-v")
 
         # Show fqdnmgr prompts to the user when possible; otherwise run quietly.
@@ -575,11 +607,6 @@ if [ "$MODE" = "domain" ] || [ "$MODE" = "proxypass" ]; then
             ;;
         taken)
             echo "Error: Domain $TARGET_DOMAIN is already taken by another owner." >&2
-            exit 1
-            ;;
-        unavailable)
-            echo "Error: Domain ownership for $TARGET_DOMAIN could not be determined (status=unavailable)." >&2
-            echo "If you are sure you own it, please add it manually to the domains database and retry." >&2
             exit 1
             ;;
         *)
@@ -703,7 +730,7 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 4: Finalize Apache configuration
 # ---------------------------------------------------------------------------
-CONF_BASENAME=$(basename "$CONF")
+CONF_BASENAME=$(basename "${CONF_FINAL:-$CONF}")
 
 if [ "$MODE" = "domain" ] && [ "$IS_DOMAIN_SUBDOMAIN" != true ]; then
     # Remove DocumentRoot from the :80 vhost (keep ServerAlias for wildcard)
@@ -772,21 +799,55 @@ elif [ "$MODE" = "proxypass" ]; then
         "$TEMPLATES_DIR/ssl_proxypass.conf.tpl" >> "$CONF"
 fi
 
-# Test Apache configuration before enabling (filter harmless AH00558 warning)
+# Move the fully-built staging config into place atomically. Back up any
+# existing destination so a failed post-enable config test can be rolled back.
+if [ "$CONF_STAGED" = true ]; then
+    chmod 0644 "$CONF"
+    if [ -f "$CONF_FINAL" ]; then
+        CONF_BACKUP="${CONF_FINAL}.a2bak.$$"
+        cp -p "$CONF_FINAL" "$CONF_BACKUP"
+    fi
+    mv -f "$CONF" "$CONF_FINAL"
+    CONF_STAGING=""      # moved into place; nothing left for the trap to clean
+    CONF="$CONF_FINAL"
+fi
+
+# Restore the destination to its pre-run state (used on validation failure).
+rollback_conf() {
+    if [ -n "$CONF_BACKUP" ]; then
+        mv -f "$CONF_BACKUP" "$CONF_FINAL"
+        CONF_BACKUP=""
+    elif [ "$CONF_STAGED" = true ]; then
+        rm -f "$CONF_FINAL"
+    fi
+}
+
+WAS_ENABLED=false
+[ -e "/etc/apache2/sites-enabled/$CONF_BASENAME" ] && WAS_ENABLED=true
+
+if ! a2ensite "$CONF_BASENAME" >/dev/null 2>&1; then
+    echo "Error: Failed to enable site $CONF_BASENAME" >&2
+    rollback_conf
+    exit 1
+fi
+vecho "Successfully enabled site: $CONF_BASENAME"
+
+# Validate the live config now that the new vhost is enabled; roll back on error
+# (filter the harmless AH00558 ServerName warning).
 CONFIGTEST_OUTPUT=$(apache2ctl configtest 2>&1 | grep -v "AH00558")
 CONFIGTEST_EXIT=${PIPESTATUS[0]}
 if [ $CONFIGTEST_EXIT -ne 0 ]; then
     echo "Error: Apache configuration test failed:" >&2
     echo "$CONFIGTEST_OUTPUT" >&2
+    [ "$WAS_ENABLED" = false ] && a2dissite "$CONF_BASENAME" >/dev/null 2>&1 || true
+    rollback_conf
+    systemctl reload apache2 >/dev/null 2>&1 || true
     exit 1
 fi
 
-if a2ensite "$CONF_BASENAME" >/dev/null 2>&1; then
-    vecho "Successfully enabled site: $CONF_BASENAME"
-else
-    echo "Error: Failed to enable site $CONF_BASENAME" >&2
-    exit 1
-fi
+# Validation passed - discard the backup.
+[ -n "$CONF_BACKUP" ] && rm -f "$CONF_BACKUP"
+CONF_BACKUP=""
 
 if systemctl reload apache2; then
     vecho "Successfully reloaded Apache"

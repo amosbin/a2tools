@@ -20,7 +20,6 @@ Options (all modes):
   --sync                           : When used with --setInitDNSRecords, wait for DNS propagation before
                                       continuing with certificate requests.
   -ni, --non-interactive           : Non-interactive mode — accept defaults / overwrite prompts.
-  -c, --strict                     : Strict validation mode for registrar/name resolution.
   -v, --verbose                    : Verbose output for debugging and status messages.
   -h, --help                       : Show this usage help (the script reads `usage.txt` for help output).
 

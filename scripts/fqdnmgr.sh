@@ -17,6 +17,9 @@ A2TOOLS_SELF_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # Format: type domain value timestamp [extra...]
 # Types: whois_* (1h TTL), ns (2h TTL), dns_change (48h TTL), ap (never expires)
 A2TOOLS_CACHE_FILE="$A2TOOLS_CACHE_DIR/a2tools.cache"
+# Advisory lock serializing cache read-modify-write across concurrent runs
+# (e.g. certbot firing hooks in parallel). See _with_cache_lock.
+A2TOOLS_CACHE_LOCK="$A2TOOLS_CACHE_DIR/.a2tools.cache.lock"
 
 CACHE_TTL_WHOIS=3600         # 1 hour
 CACHE_TTL_NS=7200            # 2 hours
@@ -36,6 +39,20 @@ init_cache() {
     fi
 }
 
+# _with_cache_lock CMD [ARGS...]: run CMD holding an exclusive flock so two
+# concurrent processes never clobber each other's cache rewrite (grep>tmp;mv).
+# Degrades to running unlocked if flock is unavailable.
+_with_cache_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x 9 2>/dev/null || true
+            "$@"
+        ) 9>"$A2TOOLS_CACHE_LOCK"
+    else
+        "$@"
+    fi
+}
+
 _cache_ttl_for() {
     case "$1" in
         whois_registrar|whois_available) echo "$CACHE_TTL_WHOIS" ;;
@@ -50,9 +67,12 @@ _cache_ttl_for() {
 cleanup_expired_cache() {
     [ -f "$A2TOOLS_CACHE_FILE" ] || return 0
     [ -w "$A2TOOLS_CACHE_FILE" ] || return 0
+    _with_cache_lock _cleanup_expired_cache_locked
+}
+_cleanup_expired_cache_locked() {
     local now_ts tmp_file
     now_ts=$(date +%s)
-    tmp_file="${A2TOOLS_CACHE_FILE}.tmp"
+    tmp_file="${A2TOOLS_CACHE_FILE}.tmp.$$"
 
     while IFS=' ' read -r type domain value timestamp rest; do
         [ -z "$type" ] && continue
@@ -94,11 +114,15 @@ cache_get() {
 
 # cache_set <type> <key> <value>
 cache_set() {
+    local type="$1" domain="$2" value="$3"
+    init_cache
+    _with_cache_lock _cache_set_locked "$type" "$domain" "$value"
+}
+_cache_set_locked() {
     local type="$1" domain="$2" value="$3" now_ts
     now_ts=$(date +%s)
-    init_cache
     if [ -f "$A2TOOLS_CACHE_FILE" ] && [ -w "$A2TOOLS_CACHE_FILE" ]; then
-        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp"
+        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp.$$"
         grep -v -- "^${type} ${domain} " "$A2TOOLS_CACHE_FILE" > "$tmp_file" 2>/dev/null || true
         mv -f "$tmp_file" "$A2TOOLS_CACHE_FILE" 2>/dev/null || true
     fi
@@ -138,12 +162,16 @@ get_cached_ns() {
 # Record when a DNS record was set.
 # Cache line: dns_change <domain>:<type>:<host>:<value> <set_ts> <cache_ts>
 cache_set_dns_change() {
+    local domain="$1" record_type="$2" host="$3" value="$4"
+    init_cache
+    _with_cache_lock _cache_set_dns_change_locked "$domain" "$record_type" "$host" "$value"
+}
+_cache_set_dns_change_locked() {
     local domain="$1" record_type="$2" host="$3" value="$4" now_ts
     now_ts=$(date +%s)
     local cache_key="${domain}:${record_type}:${host}:${value}"
-    init_cache
     if [ -f "$A2TOOLS_CACHE_FILE" ] && [ -w "$A2TOOLS_CACHE_FILE" ]; then
-        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp"
+        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp.$$"
         grep -v -- "^dns_change ${cache_key} " "$A2TOOLS_CACHE_FILE" > "$tmp_file" 2>/dev/null || true
         mv -f "$tmp_file" "$A2TOOLS_CACHE_FILE" 2>/dev/null || true
     fi
@@ -180,7 +208,11 @@ cache_delete_dns_change() {
     local cache_key="${domain}:${record_type}:${host}:${value}"
     [ -f "$A2TOOLS_CACHE_FILE" ] || return 0
     [ -w "$A2TOOLS_CACHE_FILE" ] || return 0
-    local tmp_file="${A2TOOLS_CACHE_FILE}.tmp"
+    _with_cache_lock _cache_delete_dns_change_locked "$cache_key"
+}
+_cache_delete_dns_change_locked() {
+    local cache_key="$1"
+    local tmp_file="${A2TOOLS_CACHE_FILE}.tmp.$$"
     grep -v -- "^dns_change ${cache_key} " "$A2TOOLS_CACHE_FILE" > "$tmp_file" 2>/dev/null || true
     mv -f "$tmp_file" "$A2TOOLS_CACHE_FILE" 2>/dev/null || true
 }
@@ -203,11 +235,15 @@ cache_get_ap() {
 }
 
 cache_set_ap() {
+    local ns_server="$1" avg_seconds="$2"
+    init_cache
+    _with_cache_lock _cache_set_ap_locked "$ns_server" "$avg_seconds"
+}
+_cache_set_ap_locked() {
     local ns_server="$1" avg_seconds="$2" now_ts
     now_ts=$(date +%s)
-    init_cache
     if [ -f "$A2TOOLS_CACHE_FILE" ] && [ -w "$A2TOOLS_CACHE_FILE" ]; then
-        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp"
+        local tmp_file="${A2TOOLS_CACHE_FILE}.tmp.$$"
         grep -v -- "^ap ${ns_server} " "$A2TOOLS_CACHE_FILE" > "$tmp_file" 2>/dev/null || true
         mv -f "$tmp_file" "$A2TOOLS_CACHE_FILE" 2>/dev/null || true
     fi
@@ -353,12 +389,12 @@ check_tld_priority() {
 # Credentials / providers
 # =============================================================================
 
-# get_credentials REGISTRAR OPERATION
+# get_credentials REGISTRAR
 # exit-on-failure wrapper around creds_get so hooks (certify/cleanup) abort
 # with distinct exit codes that a2sitemgr can map to actionable messages:
 #   11=no credentials, 12=creds DB missing, 15=incomplete row
 get_credentials() {
-    local registrar="$1" operation="$2"
+    local registrar="$1"
     creds_get "$registrar" || exit $?
 }
 
@@ -376,7 +412,7 @@ usage() {
 
 # Common initialization for certify and cleanup
 init_provider_for_dns_operation() {
-    local registrar="$1" operation="$2"
+    local registrar="$1"
 
     if [ -z "${CERTBOT_DOMAIN:-}" ]; then
         echo "Error: CERTBOT_DOMAIN environment variable not set" >&2
@@ -387,7 +423,7 @@ init_provider_for_dns_operation() {
         exit 1
     fi
 
-    get_credentials "$registrar" "$operation"
+    get_credentials "$registrar"
     load_provider "$registrar" || exit 1
 
     if ! get_wan_ip; then
@@ -401,7 +437,7 @@ init_provider_for_dns_operation() {
 
 certify() {
     local registrar="$1"
-    init_provider_for_dns_operation "$registrar" "certify"
+    init_provider_for_dns_operation "$registrar"
 
     # Show challenge progress from certbot environment variables
     if [ "$VERBOSE" = true ] && [ -n "${CERTBOT_ALL_DOMAINS:-}" ]; then
@@ -434,14 +470,14 @@ certify() {
 
 cleanup() {
     local registrar="$1"
-    init_provider_for_dns_operation "$registrar" "cleanup"
+    init_provider_for_dns_operation "$registrar"
     provider_cleanup "$CERTBOT_DOMAIN" "$CERTBOT_VALIDATION" "$WAN_IP"
 }
 
 purchase() {
     local fqdn="$1" registrar="$2"
 
-    get_credentials "$registrar" "purchase"
+    get_credentials "$registrar"
     load_provider "$registrar" || exit 1
 
     export FQDN="$fqdn"
@@ -1851,21 +1887,13 @@ case "$FUNCTION_NAME" in
         fi
         REGISTRAR=""
         while [ $# -gt 0 ]; do
-            case "$1" in
-                --strict)
-                    # Accepted for a2sitemgr compatibility (strict handling
-                    # happens in the caller); no fqdnmgr-side behavior.
-                    ;;
-                *)
-                    if [ -z "$REGISTRAR" ]; then
-                        REGISTRAR="$1"
-                    else
-                        echo "Error: unexpected argument '$1'" >&2
-                        echo "Usage: $0 check <FQDN> [REGISTRAR]" >&2
-                        exit 1
-                    fi
-                    ;;
-            esac
+            if [ -z "$REGISTRAR" ]; then
+                REGISTRAR="$1"
+            else
+                echo "Error: unexpected argument '$1'" >&2
+                echo "Usage: $0 check <FQDN> [REGISTRAR]" >&2
+                exit 1
+            fi
             shift
         done
         check_status "$FQDN" "$REGISTRAR"
