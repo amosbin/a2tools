@@ -1,0 +1,43 @@
+.TH A2CERTRENEW 1 "2026-07-05" "a2tools 1.0.0" "User Commands"
+.SH NAME
+a2certrenew \- force a manual \fBcertbot renew\fR run
+.SH SYNOPSIS
+.B a2certrenew
+.RI [ certbot\-flags ...]
+.SH DESCRIPTION
+\fBa2certrenew\fR is a thin wrapper over \fBcertbot renew\fR.
+It exists so the run can be logged to
+\fB/var/log/a2tools/a2certrenew.log\fR and so the operator does not
+have to remember the verb.
+.PP
+Routine renewals are NOT triggered by this script: \fBcertbot\fR's own
+systemd timer (shipped with the \fBcertbot\fR package) runs
+\fBcertbot renew\fR twice a day. The
+\fB/etc/letsencrypt/renewal\-hooks/deploy/a2tools\fR deploy hook
+reloads Apache and updates the \fBa2tools\fR domains database after
+every successful renewal.
+.PP
+Any extra arguments are passed through to \fBcertbot renew\fR, for
+example:
+.PP
+.RS
+.nf
+sudo a2certrenew \-\-force\-renewal
+sudo a2certrenew \-\-cert\-name example.com
+sudo a2certrenew \-\-dry\-run
+.fi
+.RE
+.SH EXIT STATUS
+The exit status of \fBcertbot renew\fR is returned unchanged.
+.SH FILES
+.TP
+.I /var/log/a2tools/a2certrenew.log
+Per\-run log of every manual invocation.
+.TP
+.I /etc/letsencrypt/renewal\-hooks/deploy/a2tools
+Symlink to the \fBa2tools\fR deploy hook (installed by the package's
+postinst script).
+.SH SEE ALSO
+.BR a2sitemgr (1),
+.BR certbot (1),
+.BR certbot.timer (8)

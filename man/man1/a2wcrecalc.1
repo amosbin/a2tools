@@ -1,0 +1,39 @@
+.TH A2WCRECALC 1 "2026-07-05" "a2tools 1.0.0" "User Commands"
+.SH NAME
+a2wcrecalc \- recalculate Apache configs to toggle wildcard subdomain support
+.SH SYNOPSIS
+.B a2wcrecalc
+.RI [ wildcard\-domain ]
+.SH DESCRIPTION
+\fBa2wcrecalc\fR walks every Apache site config under
+\fB/etc/apache2/sites\-available/\fR and rewrites the \fBServerName\fR /
+\fBServerAlias\fR directives so that the wildcard subdomain (default
+\fBmail.*\fR, configurable via the first argument) is either added or
+removed from each vhost consistently.
+.PP
+This is the safe way to enable or disable wildcard subdomains across all
+existing vhosts: it preserves the rest of the config, only touching the
+server name lines, and re\-enables / disables the affected site
+symlinks under \fBsites\-enabled\fR.
+.PP
+After the rewrite, run
+.RB \fBapache2ctl configtest\fR
+and
+.RB \fBsystemctl reload apache2\fR
+to apply.
+.SH OPTIONS
+.TP
+.I wildcard\-domain
+Optional. Subdomain wildcard pattern to add or remove (default
+\fBmail.*\fR).
+.SH FILES
+.TP
+.I /etc/apache2/sites\-available/
+Apache vhost configs.
+.TP
+.I /etc/apache2/sites\-enabled/
+Symlinks to enabled vhosts.
+.SH SEE ALSO
+.BR a2sitemgr (1),
+.BR a2wcrecalc\-dms (1),
+.BR apache2ctl (8)

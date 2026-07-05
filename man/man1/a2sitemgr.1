@@ -1,0 +1,116 @@
+.TH A2SITEMGR 1 "2026-07-05" "a2tools 1.0.0" "User Commands"
+.SH NAME
+a2sitemgr \- opinionated Apache virtual\-host manager
+.SH SYNOPSIS
+.B a2sitemgr
+.RB [ \-d " " \fIDOMAIN\fR]
+.RB [ \-\-mode
+.RB { domain | proxypass | swc }]
+.RB [ \-p " " \fIPORT\fR]
+.RB [ \-s | \-\-secured ]
+.RB [ \-r " " \fIREGISTRAR\fR]
+.RB [ \-\-non\-interactive ]
+.RB [ \-\-set\-init\-dns ]
+.RB [ \-\-set\-init\-dns\-override ]
+.RB [ \-\-set\-init\-dns\-sync ]
+.RB [ \-\-no\-dns ]
+.RB [ \-v | \-\-verbose ]
+.RB [ \-\-help ]
+.SH DESCRIPTION
+\fBa2sitemgr\fR creates Apache2 virtual hosts using a small set of
+opinionated, repeatable templates and obtains TLS certificates via
+\fBcertbot\fR.
+.PP
+Three modes are supported:
+.TP
+.B domain
+Standard vhost for a single base domain. Requests a wildcard certificate
+for the base domain using the ACME DNS\-01 challenge via the configured
+\fBfqdnmgr\fR hooks.
+.TP
+.B proxypass
+Reverse\-proxied subdomain backed by the base domain's existing wildcard
+certificate. Use \fB\-\-secured\fR when the upstream service speaks HTTPS.
+.TP
+.B swc
+Subdomain wildcard. A single \fImail.*\fR vhost serves the same subdomain
+across every base domain managed by \fBa2tools\fR, reusing the base
+domains' existing certificates.
+.PP
+If a domain is owned by a registrar that \fBfqdnmgr\fR knows about,
+\fBa2sitemgr\fR will verify ownership, set the required DNS records and
+wait for propagation before invoking \fBcertbot\fR.
+.SH OPTIONS
+.TP
+.BR \-d ", " \-\-domain " " \fIDOMAIN\fR
+Domain or subdomain to manage. Required.
+.RB "For " "swc" " mode pass a wildcard such as " "mail.*" "."
+.TP
+.BR \-\-mode " " { \fBdomain\fR | \fBproxypass\fR | \fBswc\fR }
+Vhost mode. Default: \fBdomain\fR.
+.TP
+.BR \-p ", " \-\-proxy\-port " " \fIPORT\fR
+Local port to reverse proxy to (proxypass mode only).
+.TP
+.BR \-s ", " \-\-secured
+Upstream service is HTTPS (proxypass mode only).
+.TP
+.BR \-r ", " \-\-registrar " " \fIREGISTRAR\fR
+Registrar slug (e.g. \fBnamecheap.com\fR) used to verify ownership and
+configure DNS records.
+.TP
+.BR \-\-non\-interactive
+Do not prompt. Fail if required information is missing.
+.TP
+.BR \-\-set\-init\-dns
+Set the initial DNS records required for HTTPS before certificate
+issuance.
+.TP
+.BR \-\-set\-init\-dns\-override
+Like \fB\-\-set\-init\-dns\fR, but overwrite existing records that
+\fBa2sitemgr\fR previously set.
+.TP
+.BR \-\-set\-init\-dns\-sync
+Block until DNS propagation is confirmed.
+.TP
+.BR \-\-no\-dns
+Skip DNS setup (use only when the domain is already correctly delegated).
+.TP
+.BR \-v ", " \-\-verbose
+Print progress on the controlling terminal.
+.TP
+.BR \-h ", " \-\-help
+Print the embedded usage text and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B >0
+An error occurred (certbot failure, DNS propagation failure, missing
+dependency, etc.). Details are logged to
+\fB/var/log/a2tools/fqdnmgr.log\fR.
+.SH FILES
+.TP
+.I /etc/a2tools/domain.conf
+Per\-domain vhost parameters.
+.TP
+.I /etc/apache2/sites\-available/
+Generated vhost configs.
+.TP
+.I /var/lib/a2tools/domains.db
+SQLite database tracking the domains managed by \fBa2tools\fR.
+.TP
+.I /var/log/a2tools/
+Operational logs.
+.SH SEE ALSO
+.BR a2certrenew (1),
+.BR a2wcrecalc (1),
+.BR a2wcrecalc\-dms (1),
+.BR fqdnmgr (1),
+.BR fqdncredmgr (1),
+.BR certbot (1),
+.BR apache2ctl (8)
+.PP
+Project homepage:
+.RI < https://github.com/amosbin/a2tools >

@@ -1,0 +1,85 @@
+.TH FQDNMGR 1 "2026-07-05" "a2tools 1.0.0" "User Commands"
+.SH NAME
+fqdnmgr \- provision domains: ownership checks, purchases and DNS records
+.SH SYNOPSIS
+.B fqdnmgr
+.RB [ \-\-help "] [" \-v | \-\-verbose ]
+.RB { \fIcommand\fR " " [\fIargs\fR ...] }
+.SH DESCRIPTION
+\fBfqdnmgr\fR interacts with domain registrars (Namecheap, Wedos, ...)
+through a small plugin interface to check domain availability, purchase
+domains, list domains on an account, and set DNS records. It also
+implements the auth / cleanup hooks used by \fBcertbot\fR for ACME
+DNS\-01 challenges.
+.PP
+Credentials are read from the root\-only SQLite database at
+\fB/var/lib/a2tools/creds.db\fR (mode 0600) that \fBfqdncredmgr\fR(1)
+manages. No daemon, no socket, no environment variables.
+.PP
+Available subcommands (use \fB\-\-help\fR for the full list):
+.TP
+.B availability
+Print whether a domain is available for registration.
+.TP
+.B purchase
+Buy a domain via the configured registrar.
+.TP
+.B list
+List domains associated with a registrar account.
+.TP
+.B status
+Print the status of a domain (expiry, nameservers, ...).
+.TP
+.B setInitDNSRecords
+Set the initial DNS records (\fBA\fR, \fBAAAA\fR, mail MX/SPF/DKIM,
+ACME \fB_txt_acme\-challenge\fR placeholder) for the listed domains.
+With \fB\-r\fR, apply to every domain on the given registrar.
+.TP
+.B unset / set
+Low\-level record manipulation. Use \fBsetInitDNSRecords\fR unless you
+need fine\-grained control.
+.PP
+\fBsetInitDNSRecords\fR polls the configured nameservers and Google DNS
+\fB8.8.8.8\fR for propagation using exponentially decaying checkpoints
+capped at the historical average for that provider, with a 10 second
+safety buffer. The check is always run before \fBcertbot\fR is invoked,
+to avoid a certbot crash on missing DNS.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Print progress on the controlling terminal.
+.TP
+.BR \-h ", " \-\-help
+Print the embedded usage text and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B >0
+The registrar API returned an error, propagation timed out, or a
+required parameter was missing.
+.SH FILES
+.TP
+.I /var/lib/a2tools/creds.db
+Provider credentials (read by the provider plugins).
+.TP
+.I /var/cache/a2tools/a2tools.cache
+Propagation, whois and NS cache.
+.TP
+.I /var/log/a2tools/fqdnmgr.log
+Request / response log and operational messages.
+.TP
+.I /etc/a2tools/providers/
+Local provider plugin overrides.
+.TP
+.I /usr/lib/a2tools/providers/
+Shipped provider plugins.
+.SH SEE ALSO
+.BR a2sitemgr (1),
+.BR a2certrenew (1),
+.BR fqdncredmgr (1),
+.BR certbot (1)
+.PP
+Project homepage:
+.RI < https://github.com/amosbin/a2tools >

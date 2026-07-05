@@ -1,0 +1,82 @@
+.TH FQDNCREDMGR 1 "2026-07-05" "a2tools 1.0.0" "User Commands"
+.SH NAME
+fqdncredmgr \- manage registrar API credentials
+.SH SYNOPSIS
+.B fqdncredmgr
+.RB add " " \fIprovider\fR " " \fIusername\fR
+.RB [ \-p " " { \fIkey\fR | \fB-\fR } ]
+.B fqdncredmgr
+.RB update " " \fIprovider\fR " " \fIusername\fR
+.RB [ \-p " " { \fIkey\fR | \fB-\fR } ]
+.B fqdncredmgr
+.RB delete " " \fIprovider\fR " " \fIusername\fR
+.B fqdncredmgr
+.RB list
+.RB [ \fIprovider\fR ]
+.B fqdncredmgr
+.RB show " " \fIprovider\fR " " \fIusername\fR
+.B fqdncredmgr
+.RB providers
+.B fqdncredmgr
+.RB { \-\-help " | " \-h }
+.SH DESCRIPTION
+\fBfqdncredmgr\fR stores registrar API credentials in a root\-only
+SQLite database at \fB/var/lib/a2tools/creds.db\fR (mode 0600). The
+credentials are read directly by \fBfqdnmgr\fR(1) from that database
+\- there is no daemon, no socket and no environment variable
+intermediary.
+.PP
+Supplying the API key:
+.IP
+\fB\-p\fR \fIKEY\fR   use \fIKEY\fR (visible in the process list; discouraged)
+.IP
+\fB\-p\fR \fB\-\fR   read the key from stdin (recommended for scripting)
+.IP
+omitted   prompt interactively with masked input
+(\fBsystemd\-ask\-password\fR if available, otherwise \fBread \-s\fR
+from \fB/dev/tty\fR).
+.PP
+Passing the key as a bare command\-line argument is NOT supported: argv
+is visible to every local user via \fBps\fR and lands in shell
+history.
+.SH COMMANDS
+.TP
+.B add \fIprovider\fR \fIusername\fR
+Add a new credential. Prompts for the API key, unless \fB\-p\fR is
+given.
+.TP
+.B update \fIprovider\fR \fIusername\fR
+Replace the API key for an existing credential.
+.TP
+.B delete \fIprovider\fR \fIusername\fR
+Delete a credential.
+.TP
+.B list [\fIprovider\fR]
+List stored credentials, optionally filtered by provider.
+.TP
+.B show \fIprovider\fR \fIusername\fR
+Print the metadata of a credential (the key itself is never printed).
+.TP
+.B providers
+List every provider that has a plugin installed.
+.SH OPTIONS
+.TP
+.BR \-p " " { \fIkey\fR | \fB\- }
+API key source (see above).
+.TP
+.BR \-h ", " \-\-help
+Print the embedded usage text and exit.
+.SH FILES
+.TP
+.I /var/lib/a2tools/creds.db
+SQLite database with provider credentials.
+.TP
+.I /usr/lib/a2tools/providers/ ,
+.I /etc/a2tools/providers/
+Provider plugin directories (shipped and local overrides).
+.SH SEE ALSO
+.BR fqdnmgr (1),
+.BR a2sitemgr (1)
+.PP
+Project homepage:
+.RI < https://github.com/amosbin/a2tools >

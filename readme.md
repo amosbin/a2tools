@@ -1,3 +1,9 @@
+# a2tools
+
+Opinionated Apache2 virtual host management, registrar (Namecheap, Wedos) automation, and ACME DNS-01 certificate issuance.
+
+Current release: **1.0.0**
+
 # overview
 
 - Apache2 is very flexible and supports many kinds of virtual hosts, but many configurations are repetitive. `a2sitemgr` provides a quick, opinionated way to deploy the most common virtual-host patterns and is designed to make automation easy.
@@ -107,5 +113,15 @@ Remove the package with apt:
 ```
 sudo apt purge a2tools
 ```
+
+## Manpages
+After install, every command has a manpage:
+- `man a2sitemgr`
+- `man a2certrenew`
+- `man a2wcrecalc`
+- `man a2wcrecalc-dms`
+- `man fqdnmgr`
+- `man fqdncredmgr`
+
 ## License
-I vibe coded this entire deal so feel free to use it as you wish
+This project is licensed under the [MIT License](LICENSE) (c) 2026 Amine Tbaik. See [LICENSE](LICENSE) for the full text.
