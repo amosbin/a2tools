@@ -1,0 +1,21 @@
+Usage: fqdncredmgr <action> [provider] [username] [-p -] [-v]
+
+Actions:
+  add <REGISTRAR> <username>        Set credentials (replaces existing if any)
+  update <REGISTRAR> <username>     Update existing credentials
+  delete <REGISTRAR>                Delete credentials for provider
+  list                              List stored providers and masked usernames
+
+Options:
+  -p -          Read the API key from stdin (recommended for scripting;
+                keeps the secret out of the process list and shell history).
+                Example: printf '%s\n' "$KEY" | fqdncredmgr add namecheap.com user -p -
+  (omitted)     Prompt interactively with masked input.
+  -v            Verbose output.
+
+Note: passing the API key itself as a command-line argument is not supported
+(argv is visible to all local users via `ps` and lands in shell history).
+
+Notes:
+  - Each registrar can have only one set of credentials (one username).
+  - Credentials are stored in /var/lib/a2tools/creds.db (root-only, 0600).

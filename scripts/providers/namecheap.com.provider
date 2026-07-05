@@ -1,6 +1,8 @@
-#!/bin/bash
-# Namecheap DNS provider
-# Expects `PROVIDER_USERNAME` and `PROVIDER_API_KEY` to be exported by the caller (provided by the credentials daemon)
+# shellcheck shell=bash
+# Namecheap DNS provider plugin. Sourced by fqdnmgr, which provides:
+#   PROVIDER_USERNAME / PROVIDER_API_KEY (from the credentials DB),
+#   get_wan_ip, sql_escape, vecho, log_request/log_response, LOG_FILE,
+#   DOMAINS_DB_PATH, DOMAIN_CONFIG_PATH, and the DNS cache helpers.
 
 PROVIDER_NAME="namecheap.com"
 PROVIDER_API_BASE="https://api.namecheap.com/xml.response"
@@ -14,39 +16,8 @@ RATE_LIMIT_MINUTE=50
 RATE_LIMIT_HOUR=700
 RATE_LIMIT_DAY=8000
 RATE_LIMIT_BUFFER=5  # seconds buffer
-RATE_DB_PATH="/etc/fqdnmgr/providers/namecheap.com-rate.db"
-DOMAINS_DB_PATH="/etc/fqdntools/domains.db"
-
-# Helper: get WAN_IP - reads from the process environment first, then the settings file, errors if not set
-WAN_IP_SETTINGS_FILE="${WAN_IP_SETTINGS_FILE:-/etc/environment}"
-
-read_wan_ip_from_settings() {
-    local settings_file="${1:-$WAN_IP_SETTINGS_FILE}"
-
-    if [ -f "$settings_file" ]; then
-        WAN_IP=$(grep -E "^WAN_IP=" "$settings_file" 2>/dev/null | cut -d= -f2 | tr -d '"')
-        if [ -n "$WAN_IP" ]; then
-            return 0
-        fi
-    fi
-
-    return 1
-}
-
-get_wan_ip() {
-    if [ -n "${WAN_IP:-}" ]; then
-        export WAN_IP
-        return 0
-    fi
-    
-    if read_wan_ip_from_settings; then
-        export WAN_IP
-        return 0
-    fi
-    
-    echo "Error: WAN_IP not set in the environment or settings file" >&2
-    return 1
-}
+RATE_DB_PATH="${A2TOOLS_STATE:-/var/lib/a2tools}/namecheap.com-rate.db"
+DOMAINS_DB_PATH="${DOMAINS_DB_PATH:-/var/lib/a2tools/domains.db}"
 
 # Initialize rate limit database if it doesn't exist
 init_rate_db() {
@@ -153,6 +124,10 @@ get_wait_time() {
 }
 
 # Rate-limited POST-only wrapper: `api_request <Command> <WAN_IP> <&params>`
+#
+# SECURITY: the entire request body (including ApiKey) is fed to curl on
+# STDIN (--data @-). Nothing secret ever appears in curl's argv, so the key
+# cannot be read from `ps` / /proc/*/cmdline by other local users.
 api_request() {
     local command="$1"
     local wan_ip="$2"
@@ -161,24 +136,19 @@ api_request() {
     # Record the API call
     record_api_call 1
 
-    # Build base URL without extra params
-    local base_url="${PROVIDER_API_BASE}?ApiUser=${PROVIDER_USERNAME}&ApiKey=${PROVIDER_API_KEY}&UserName=${PROVIDER_USERNAME}&Command=${command}&ClientIp=${wan_ip}"
-
-    # Prepare data: strip leading '&' if present
+    # Auth + command parameters go in the POST body together with the extras.
+    # Use raw params (not --data-urlencode) because phone numbers must NOT be
+    # URL encoded; callers pre-format their values.
     local data="${extra_params#&}"
+    local body="ApiUser=${PROVIDER_USERNAME}&ApiKey=${PROVIDER_API_KEY}&UserName=${PROVIDER_USERNAME}&Command=${command}&ClientIp=${wan_ip}"
+    [ -n "$data" ] && body="${body}&${data}"
 
-    # Use --data instead of --data-urlencode because phone numbers must NOT be URL encoded
-    # The parameters are already properly formatted
-    local curl_args=(--data "$data")
+    # Log the request (mask the API key)
+    local masked_body
+    masked_body=$(printf '%s' "$body" | sed 's/ApiKey=[^&]*/ApiKey=***MASKED***/g')
+    log_request "$PROVIDER_NAME" "curl -s --data @- \"$PROVIDER_API_BASE\"  # body: $masked_body"
 
-    # Log the request (mask API key for security)
-    local masked_url
-    masked_url=$(echo "$base_url" | sed 's/ApiKey=[^&]*/ApiKey=***MASKED***/g')
-    local masked_data
-    masked_data=$(echo "$data" | sed 's/ApiKey=[^&]*/ApiKey=***MASKED***/g')
-    log_request "$PROVIDER_NAME" "curl -s --data \"$masked_data\" \"$masked_url\""
-
-    API_RESPONSE=$(curl -s "${curl_args[@]}" "$base_url")
+    API_RESPONSE=$(printf '%s' "$body" | curl -s --max-time 60 --data @- "$PROVIDER_API_BASE")
     local curl_status=$?
 
     # Log the response
@@ -186,15 +156,6 @@ api_request() {
 
     echo "$API_RESPONSE"
     return $curl_status
-}
-
-# Build API URL with auth
-build_api_url() {
-    local command="$1"
-    local wan_ip="$2"
-    local extra_params="${3:-}"
-    
-    echo "${PROVIDER_API_BASE}?ApiUser=${PROVIDER_USERNAME}&ApiKey=${PROVIDER_API_KEY}&UserName=${PROVIDER_USERNAME}&Command=${command}&ClientIp=${wan_ip}${extra_params}"
 }
 
 # Exit on API error
@@ -507,8 +468,8 @@ provider_set_init_dns_records() {
     fi
 }
 
-# Domain config path
-DOMAIN_CONF="/etc/fqdnmgr/domain.conf"
+# Domain config path (shared a2tools config)
+DOMAIN_CONF="${DOMAIN_CONFIG_PATH:-/etc/a2tools/domain.conf}"
 
 # Load domain registration config
 load_domain_config() {
@@ -774,7 +735,7 @@ provider_list_all_domains() {
     
     # Sync all domains to local domains.db
     for domain in "${all_domains[@]}"; do
-        sqlite3 "$DOMAINS_DB_PATH" "INSERT INTO domains (domain, status, registrar) VALUES ('$domain', 'owned', 'namecheap.com') ON CONFLICT(domain) DO UPDATE SET status='owned', registrar='namecheap.com';" 2>/dev/null
+        sqlite3 "$DOMAINS_DB_PATH" "INSERT INTO domains (domain, status, registrar) VALUES ('$(sql_escape "$domain")', 'owned', 'namecheap.com') ON CONFLICT(domain) DO UPDATE SET status='owned', registrar='namecheap.com';" 2>/dev/null
     done
     
     # Print all domains
@@ -840,7 +801,7 @@ provider_list_owned_domains() {
                     OWNED_DOMAINS_LIST+=("$domain_name")
                     
                     # Sync to local domains.db
-                    sqlite3 "$DOMAINS_DB_PATH" "INSERT INTO domains (domain, status, registrar) VALUES ('$domain_name', 'owned', 'namecheap.com') ON CONFLICT(domain) DO UPDATE SET status='owned', registrar='namecheap.com';" 2>/dev/null
+                    sqlite3 "$DOMAINS_DB_PATH" "INSERT INTO domains (domain, status, registrar) VALUES ('$(sql_escape "$domain_name")', 'owned', 'namecheap.com') ON CONFLICT(domain) DO UPDATE SET status='owned', registrar='namecheap.com';" 2>/dev/null
                 fi
             fi
         done <<< "$(echo "$response" | grep -i '<Domain ')"
@@ -857,7 +818,7 @@ provider_list_owned_domains() {
     if [ "$override_mode" = "override" ]; then
         # Override mode: include all domains regardless of dns_init status
         for domain in "${OWNED_DOMAINS_LIST[@]}"; do
-            local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$domain';" 2>/dev/null)
+            local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$(sql_escape "$domain")';" 2>/dev/null)
             if [ "$dns_init" = "1" ]; then
                 echo "$domain [DNS initialized - will override]"
             else
@@ -868,7 +829,7 @@ provider_list_owned_domains() {
         # Normal mode: filter to only domains with dns_init=0 or NULL
         local filtered_domains=()
         for domain in "${OWNED_DOMAINS_LIST[@]}"; do
-            local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$domain';" 2>/dev/null)
+            local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$(sql_escape "$domain")';" 2>/dev/null)
             if [ -z "$dns_init" ] || [ "$dns_init" = "0" ] || [ "$dns_init" = "" ]; then
                 filtered_domains+=("$domain")
                 echo "$domain"
@@ -1035,7 +996,7 @@ provider_set_all_domains_init_records() {
                 echo "Remaining: $remaining_count domain(s)"
                 echo ""
                 echo "To continue later, run:"
-                echo "  fqdnmgr initRecords namecheap.com"
+                echo "  fqdnmgr setInitDNSRecords -r namecheap.com"
                 return 1
             fi
             
@@ -1076,7 +1037,7 @@ provider_set_all_domains_init_records() {
             # Call provider_set_init_dns_records (uses POST-only `api_request`)
             if provider_set_init_dns_records "$domain" "$wan_ip" "" "$override_mode" >/dev/null 2>&1; then
                 # Update dns_init in domains.db
-                sqlite3 "$DOMAINS_DB_PATH" "UPDATE domains SET dns_init=1 WHERE domain='$domain';" 2>/dev/null
+                sqlite3 "$DOMAINS_DB_PATH" "UPDATE domains SET dns_init=1 WHERE domain='$(sql_escape "$domain")';" 2>/dev/null
                 
                 # Only add to propagation check list if records weren't already propagated
                 if [ "$dns_already_propagated" != true ]; then

@@ -1,0 +1,17 @@
+[Unit]
+Description=Prune stale rows from the a2tools domains database
+Documentation=man:fqdnmgr(8)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/a2tools/cleanup-domains.sh
+Nice=10
+
+# Hardening: this job only needs the a2tools state dir and its config.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/a2tools
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX

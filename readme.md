@@ -3,7 +3,7 @@
 - Apache2 is very flexible and supports many kinds of virtual hosts, but many configurations are repetitive. `a2sitemgr` provides a quick, opinionated way to deploy the most common virtual-host patterns and is designed to make automation easy.
 - `a2sitemgr` integrates with ACME (via `certbot`) to obtain TLS certificates automatically.
 - `fqdnmgr` complements `a2sitemgr` by interacting with domain registrars' APIs (for example, Namecheap) to check domain status, purchase domains, and set DNS records when needed.
-- `fqdncredmgr` standardizes how provider credentials are collected and stored so other tools (like `fqdnmgr`) can use them safely via secure socket.
+- `fqdncredmgr` standardizes how provider credentials are collected and stored so other tools (like `fqdnmgr`) can use them safely. Credentials live in a root-only SQLite database (`/var/lib/a2tools/creds.db`, mode 0600) and are read directly by `fqdnmgr` — no daemon, no socket.
 
 ## Commands
 in short: this script makes these commands available  
@@ -48,7 +48,11 @@ additional providers may be added, PR are also welcome
 ```
 sudo fqdncredmgr add namecheap.com username
 ```
-you can also use `-k` parameter to supply the key in non-interactive way. for full command usage options use `-h` or `--help`
+you will be prompted for the API key with masked input. For scripting, pipe the key over stdin with `-p -` (keeps it out of the process list and shell history):
+```
+printf '%s\n' "$API_KEY" | sudo fqdncredmgr add namecheap.com username -p -
+```
+for full command usage options use `-h` or `--help`
 #### 2. Purchase a domain
 ```
 sudo fqdnmgr purchase example.com namecheap.com
@@ -96,7 +100,7 @@ technically both `swc` and `proxypass` modes can be combined but as an opinionat
 - the auth hook for the ACME challenge by certbot uses a smart propagation check that uses exponontially decaying checkpoints until reaching the propagation average time for that specific provider.  
 the check is verified against the NameServer and Google DNS `8.8.8.8` then offers a minimum of 10s buffer time (actual buffer time depends on the registrar)  
 since certbot will crash if the propagation didn't happen yet, `a2sitemgr` will lower that risk to bare minimum, it almost always guarenteed to have a successful validation.  
-- `a2sitemgr` uses a cron job to check certificates expiration on daily bases then renew it 10 days before expiration
+- certificate renewals are handled by certbot's own systemd timer: the fqdnmgr auth/cleanup hooks are stored in each certificate's renewal profile, and the a2tools deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/a2tools`) reloads Apache and updates the domains database after every successful renewal. Use `a2certrenew` for a manual renewal run (extra flags such as `--dry-run` or `--cert-name` are passed through to `certbot renew`).
 
 #### Uninstall
 Remove the package with apt:

@@ -1,5 +1,8 @@
-#!/bin/bash
-# Wedos.com DNS Provider Plugin
+# shellcheck shell=bash
+# Wedos.com DNS provider plugin. Sourced by fqdnmgr, which provides:
+#   PROVIDER_USERNAME / PROVIDER_API_KEY (from the credentials DB),
+#   get_wan_ip, sql_escape, vecho, log_request/log_response, LOG_FILE,
+#   DOMAINS_DB_PATH, DOMAIN_CONFIG_PATH, and the DNS cache helpers.
 
 PROVIDER_NAME="wedos.com"
 PROVIDER_API_BASE="https://api.wedos.com/wapi/json"
@@ -7,43 +10,11 @@ PROVIDER_API_BASE="https://api.wedos.com/wapi/json"
 # DNS propagation buffer (seconds to wait after Google DNS confirms)
 DNS_PROPAGATION_BUFFER=60
 
-## Expects `PROVIDER_USERNAME` and `PROVIDER_API_KEY` to be exported by the caller (provided by the credentials daemon)
 # Rate limiting (Wedos: 1000/hour)
 RATE_LIMIT_HOUR=1000
 RATE_LIMIT_BUFFER=5
-RATE_DB_PATH="/etc/fqdnmgr/providers/wedos.com-rate.db"
-DOMAINS_DB_PATH="/etc/fqdntools/domains.db"
-
-# Helper: get WAN_IP - reads from the process environment first, then the settings file, errors if not set
-WAN_IP_SETTINGS_FILE="${WAN_IP_SETTINGS_FILE:-/etc/environment}"
-
-read_wan_ip_from_settings() {
-    local settings_file="${1:-$WAN_IP_SETTINGS_FILE}"
-
-    if [ -f "$settings_file" ]; then
-        WAN_IP=$(grep -E "^WAN_IP=" "$settings_file" 2>/dev/null | cut -d= -f2 | tr -d '"')
-        if [ -n "$WAN_IP" ]; then
-            return 0
-        fi
-    fi
-
-    return 1
-}
-
-get_wan_ip() {
-    if [ -n "${WAN_IP:-}" ]; then
-        export WAN_IP
-        return 0
-    fi
-    
-    if read_wan_ip_from_settings; then
-        export WAN_IP
-        return 0
-    fi
-    
-    echo "Error: WAN_IP not set in the environment or settings file" >&2
-    return 1
-}
+RATE_DB_PATH="${A2TOOLS_STATE:-/var/lib/a2tools}/wedos.com-rate.db"
+DOMAINS_DB_PATH="${DOMAINS_DB_PATH:-/var/lib/a2tools/domains.db}"
 
 # Check jq dependency
 check_jq() {
@@ -133,6 +104,10 @@ build_request_json() {
 }
 
 # API POST request (Wedos only uses POST)
+#
+# SECURITY: the request body (containing the derived auth token) is fed to
+# curl on STDIN (--data @-) so it never appears in curl's argv where other
+# local users could read it via `ps` / /proc/*/cmdline.
 api_request() {
     local command="$1"
     local data="${2:-null}"
@@ -145,11 +120,11 @@ api_request() {
     # Log the request (mask auth for security)
     local masked_json
     masked_json=$(echo "$json" | jq '.request.auth = "***MASKED***"')
-    log_request "$PROVIDER_NAME" "curl -s -X POST \"$PROVIDER_API_BASE\" -H \"Content-Type: application/x-www-form-urlencoded\" -d \"request=$masked_json\""
+    log_request "$PROVIDER_NAME" "curl -s -X POST \"$PROVIDER_API_BASE\" -H \"Content-Type: application/x-www-form-urlencoded\" --data @-  # body: request=$masked_json"
     
-    API_RESPONSE=$(curl -s -X POST "$PROVIDER_API_BASE" \
+    API_RESPONSE=$(printf 'request=%s' "$encoded" | curl -s -X POST "$PROVIDER_API_BASE" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "request=$encoded" \
+        --data @- \
         --max-time 60)
     local curl_status=$?
     
@@ -461,7 +436,7 @@ provider_get_balance() {
     return 0
 }
 
-DOMAIN_CONF="/etc/fqdnmgr/domain.conf"
+DOMAIN_CONF="${DOMAIN_CONFIG_PATH:-/etc/a2tools/domain.conf}"
 
 load_domain_config() {
     if [ ! -f "$DOMAIN_CONF" ]; then
@@ -666,7 +641,7 @@ provider_list_owned_domains() {
         OWNED_DOMAINS_LIST+=("$domain")
 
         # Show dns_init status indicator (read-only DB query)
-        local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$domain';" 2>/dev/null)
+        local dns_init=$(sqlite3 "$DOMAINS_DB_PATH" "SELECT dns_init FROM domains WHERE domain='$(sql_escape "$domain")';" 2>/dev/null)
         if [ "$dns_init" = "1" ]; then
             if [ "$override_mode" = "override" ]; then
                 echo "$domain [DNS initialized - will override]"
@@ -818,7 +793,7 @@ provider_set_all_domains_init_records() {
                 echo "Remaining: ${#remaining_domains[@]} domain(s)"
                 echo ""
                 echo "To continue later, run:"
-                echo "  fqdnmgr initRecords wedos.com"
+                echo "  fqdnmgr setInitDNSRecords -r wedos.com"
                 return 1
             fi
             vecho "Rate limit reached. Waiting ${wait_secs}s for next slot..."
@@ -855,7 +830,7 @@ provider_set_all_domains_init_records() {
             fi
             
             if provider_set_init_dns_records "$domain" "$wan_ip" "" "$override_mode" >/dev/null 2>&1; then
-                sqlite3 "$DOMAINS_DB_PATH" "UPDATE domains SET dns_init=1 WHERE domain='$domain';" 2>/dev/null
+                sqlite3 "$DOMAINS_DB_PATH" "UPDATE domains SET dns_init=1 WHERE domain='$(sql_escape "$domain")';" 2>/dev/null
                 
                 # Only add to propagation check list if records weren't already propagated
                 if [ "$dns_already_propagated" != true ]; then

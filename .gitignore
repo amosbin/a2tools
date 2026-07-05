@@ -1,1 +1,5 @@
 *.code-workspace
+debian/
+.DS_Store
+.AppleDouble
+.LSOverride

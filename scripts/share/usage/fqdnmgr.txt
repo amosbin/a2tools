@@ -24,6 +24,3 @@ Available functions:
   checkInitDns <FQDN>                      - checks if initial DNS record has been propagated
   -h|--help                                - pulls up this help page
 Available providers:
-
-(This file is read by the `fqdnmgr` script. The script will append the
-available providers list when printing usage.)
