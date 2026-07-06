@@ -31,22 +31,28 @@ in short: this script makes these commands available
 ## Prerequisites
 
 - Tested on Ubuntu Server `24.04 LTS` (amd64). The `debian/` packaging is Debian-policy compliant and should work on any current Debian or Ubuntu release with `debhelper-compat (= 13)`.
-- Build dependencies: `debhelper`, `build-essential`, `fakeroot`. Runtime dependencies (declared in `debian/control`) are pulled in automatically by `apt`.
+- For the local build path, you also need `build-essential`, `debhelper`, `devscripts`, and `fakeroot`. Runtime dependencies (declared in `debian/control`) are pulled in automatically by `apt`.
 
 ## Install
 
-There is no published APT repository. Build and install the package from this repository:
+The maintainer publishes prebuilt packages for supported Ubuntu releases at the Launchpad PPA `ppa:amen8/a2tools`. Install from there — that is the supported path:
 
 ```bash
-# Install build tools once
-sudo apt install build-essential debhelper devscripts fakeroot
+sudo add-apt-repository ppa:amen8/a2tools
+sudo apt update
+sudo apt install a2tools
+```
 
+If you need a build for a series the PPA does not publish (e.g. Debian, or an Ubuntu release that is not yet packaged), build the package locally from this repository:
+
+```bash
+sudo apt install build-essential debhelper devscripts fakeroot
 # From the repository root (where the top-level debian/ directory lives)
 dpkg-buildpackage -us -uc -b
 sudo apt install ../a2tools_<version>_<arch>.deb
 ```
 
-This produces a single `.deb` (source format 3.0 native, no upstream tarball required) and installs every command, manpage, systemd unit, logrotate snippet, and SQL schema under the standard FHS paths. To uninstall:
+Both paths install every command, manpage, systemd unit, logrotate snippet, and SQL schema under the standard FHS paths. To uninstall:
 
 ```bash
 sudo apt purge a2tools
