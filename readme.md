@@ -30,18 +30,27 @@ in short: this script makes these commands available
 
 ## Prerequisites
 
-- Tested on Ubuntu Server `24.04 LTS` (amd64).
-- On Debian or Ubuntu, install the packaged build from your private PPA.
+- Tested on Ubuntu Server `24.04 LTS` (amd64). The `debian/` packaging is Debian-policy compliant and should work on any current Debian or Ubuntu release with `debhelper-compat (= 13)`.
+- Build dependencies: `debhelper`, `build-essential`, `fakeroot`. Runtime dependencies (declared in `debian/control`) are pulled in automatically by `apt`.
 
 ## Install
 
-On Debian or Ubuntu, install the package from your private PPA:
+There is no published APT repository. Build and install the package from this repository:
 
 ```bash
-sudo apt install a2tools
+# Install build tools once
+sudo apt install build-essential debhelper devscripts fakeroot
+
+# From the repository root (where the top-level debian/ directory lives)
+dpkg-buildpackage -us -uc -b
+sudo apt install ../a2tools_<version>_<arch>.deb
 ```
 
-If you are packaging locally for Launchpad, build from the repository root using the `debian/` tree and upload the resulting source package to your private PPA.
+This produces a single `.deb` (source format 3.0 native, no upstream tarball required) and installs every command, manpage, systemd unit, logrotate snippet, and SQL schema under the standard FHS paths. To uninstall:
+
+```bash
+sudo apt purge a2tools
+```
 
 ## Supported registrars
 - [namecheap.com](https://www.namecheap.com)
@@ -108,11 +117,6 @@ the check is verified against the NameServer and Google DNS `8.8.8.8` then offer
 since certbot will crash if the propagation didn't happen yet, `a2sitemgr` will lower that risk to bare minimum, it almost always guarenteed to have a successful validation.  
 - certificate renewals are handled by certbot's own systemd timer: the fqdnmgr auth/cleanup hooks are stored in each certificate's renewal profile, and the a2tools deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/a2tools`) reloads Apache and updates the domains database after every successful renewal. Use `a2certrenew` for a manual renewal run (extra flags such as `--dry-run` or `--cert-name` are passed through to `certbot renew`).
 
-#### Uninstall
-Remove the package with apt:
-```
-sudo apt purge a2tools
-```
 
 ## Manpages
 After install, every command has a manpage:

@@ -3,3 +3,4 @@ debian/
 .DS_Store
 .AppleDouble
 .LSOverride
+tests/
