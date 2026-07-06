@@ -1,0 +1,12 @@
+/var/log/apache-collector/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    sharedscripts
+    postrotate
+        systemctl reload apache2 > /dev/null 2>&1 || true
+    endscript
+}

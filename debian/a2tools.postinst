@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Configuration (root-only: provider plugins are executed as root)
+        install -d -o root -g root -m 0750 /etc/a2tools /etc/a2tools/providers
+
+        # State, cache and logs
+        install -d -o root -g root -m 0750 /var/lib/a2tools /var/cache/a2tools /var/log/a2tools
+        install -d -o root -g adm  -m 0750 /var/log/apache-collector
+
+        if [ ! -f /etc/a2tools/domain.conf ]; then
+            install -o root -g root -m 0640 \
+                /usr/share/a2tools/templates/domain.conf.tpl /etc/a2tools/domain.conf
+        fi
+
+        if [ ! -f /var/lib/a2tools/domains.db ]; then
+            sqlite3 /var/lib/a2tools/domains.db < /usr/share/a2tools/sql/domains.sql
+            chown root:root /var/lib/a2tools/domains.db
+            chmod 0640 /var/lib/a2tools/domains.db
+        fi
+
+        if [ ! -f /var/lib/a2tools/creds.db ]; then
+            sqlite3 /var/lib/a2tools/creds.db < /usr/share/a2tools/sql/creds.sql
+            chown root:root /var/lib/a2tools/creds.db
+            chmod 0600 /var/lib/a2tools/creds.db
+        fi
+
+        # Register the deploy hook so certbot's own renewal timer reloads
+        # Apache and updates the domains DB after every successful renewal.
+        install -d /etc/letsencrypt/renewal-hooks/deploy
+        ln -sf /usr/lib/a2tools/deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/a2tools
+        ;;
+esac
+
+#DEBHELPER#

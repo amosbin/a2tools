@@ -1,0 +1,64 @@
+a2tools (1.0.0) noble; urgency=medium
+
+  * 1.0.0 release.
+  * Licensing:
+    - Add MIT license (LICENSE).
+    - Update debian/copyright to the Expat (MIT) form.
+  * Documentation:
+    - Add manpages for every user-facing command: a2sitemgr(1),
+      a2certrenew(1), a2wcrecalc(1), a2wcrecalc-dms(1), fqdnmgr(1) and
+      fqdncredmgr(1). Installed to /usr/share/man/man1/.
+
+ -- Amine Tbaik <tbaik.amine@gmail.com>  Sun, 05 Jul 2026 00:00:00 +0000
+
+a2tools (0.2) noble; urgency=medium
+
+  * Rearchitecture release.
+  * Packaging:
+    - Switch to source format 3.0 (native); no orig tarball required.
+    - Move scripts out of /usr/bin subdirectories (FHS violation) into
+      /usr/lib/a2tools with /usr/bin symlinks; shared data (templates,
+      usage texts, SQL schemas) now lives in /usr/share/a2tools.
+    - Fix inverted debian/links entries; logrotate snippet now installs to
+      the correct path.
+    - Add missing runtime dependencies: jq, libxml2-utils. Drop socat,
+      cron, openssl, apache2-utils (no longer used).
+    - Add postrm: clean state/cache/logs and the certbot hook on purge.
+  * Scheduling:
+    - Replace broken cron files (wrong paths, dotted filenames skipped by
+      run-parts) with a systemd timer for domain DB cleanup and certbot's
+      own renewal timer plus a deploy hook for certificate renewals.
+  * Security:
+    - Remove the fqdncredmgrd socket daemon; credentials are read directly
+      from the root-only SQLite DB (/var/lib/a2tools/creds.db, 0600).
+    - Provider API credentials are no longer passed on the curl command
+      line (were visible in the process list); request bodies are sent via
+      stdin.
+    - Move the shared cache from the predictable world-writable /tmp path
+      to /var/cache/a2tools (prevents local cache poisoning of root's DNS
+      verification).
+    - Validate WAN IP lookups (HTTPS, timeout, strict IPv4 check); state
+      is stored in /var/lib/a2tools instead of mutating /etc/environment.
+    - Consistent SQL escaping for all sqlite interpolations; FQDN
+      validation at all entry points.
+    - fqdncredmgr can read API keys from stdin (-p -); passing the key as a
+      command-line argument is no longer supported. Interactive prompts use
+      systemd-ask-password (masked) with a read fallback.
+  * Robustness:
+    - Shared library (lib/common.sh); libraries no longer set shell
+      options or traps in the sourcing script. The getinput library was
+      dropped entirely in favor of the read builtin and
+      systemd-ask-password; interactive prompts no longer time out.
+    - fqdnmgr output works without a TTY (certbot hooks under timers).
+    - a2certrenew is now a thin wrapper over `certbot renew` (fixes lost
+      renewal counters and abort-on-first-failure).
+    - Configuration consolidated under /etc/a2tools; databases and state
+      under /var/lib/a2tools.
+
+ -- Amine Tbaik <tbaik.amine@gmail.com>  Sun, 05 Jul 2026 00:00:00 +0000
+
+a2tools (0.1-1) noble; urgency=medium
+
+  * Initial Debian packaging for private PPA delivery.
+
+ -- Amine Tbaik <tbaik.amine@gmail.com>  Sat, 04 Jul 2026 00:00:00 +0000

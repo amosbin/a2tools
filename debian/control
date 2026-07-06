@@ -1,0 +1,28 @@
+Source: a2tools
+Section: admin
+Priority: optional
+Maintainer: Amine Tbaik <tbaik.amine@gmail.com>
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13)
+
+Package: a2tools
+Architecture: all
+Depends: ${misc:Depends},
+ apache2,
+ certbot,
+ curl,
+ dnsutils,
+ jq,
+ libxml2-utils,
+ logrotate,
+ sqlite3,
+ whois
+Description: Apache virtual host, domain, and ACME tooling
+ A2Tools provides shell utilities for Apache site management, domain
+ registrar automation, ACME certificate issuance via DNS-01 challenges,
+ and provider credential management.
+ .
+ Routine certificate renewals are handled by certbot's own systemd timer
+ together with the a2tools deploy hook; a weekly systemd timer prunes
+ stale entries from the local domains database.

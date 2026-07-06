@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        rm -f /etc/letsencrypt/renewal-hooks/deploy/a2tools
+        ;;
+    purge)
+        rm -f /etc/letsencrypt/renewal-hooks/deploy/a2tools
+        rm -rf /var/lib/a2tools /var/cache/a2tools /var/log/a2tools
+        rm -rf /etc/a2tools
+        ;;
+esac
+
+# Automatically added by dh_installsystemd/13.14.1ubuntu5
+if [ "$1" = remove ] && [ -d /run/systemd/system ] ; then
+	systemctl --system daemon-reload >/dev/null || true
+fi
+# End automatically added section
+# Automatically added by dh_installsystemd/13.14.1ubuntu5
+if [ "$1" = "purge" ]; then
+	if [ -x "/usr/bin/deb-systemd-helper" ]; then
+		deb-systemd-helper purge 'a2tools-domain-cleanup.timer' >/dev/null || true
+	fi
+fi
+# End automatically added section
+

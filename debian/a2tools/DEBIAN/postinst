@@ -1,0 +1,67 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Configuration (root-only: provider plugins are executed as root)
+        install -d -o root -g root -m 0750 /etc/a2tools /etc/a2tools/providers
+
+        # State, cache and logs
+        install -d -o root -g root -m 0750 /var/lib/a2tools /var/cache/a2tools /var/log/a2tools
+        install -d -o root -g adm  -m 0750 /var/log/apache-collector
+
+        if [ ! -f /etc/a2tools/domain.conf ]; then
+            install -o root -g root -m 0640 \
+                /usr/share/a2tools/templates/domain.conf.tpl /etc/a2tools/domain.conf
+        fi
+
+        if [ ! -f /var/lib/a2tools/domains.db ]; then
+            sqlite3 /var/lib/a2tools/domains.db < /usr/share/a2tools/sql/domains.sql
+            chown root:root /var/lib/a2tools/domains.db
+            chmod 0640 /var/lib/a2tools/domains.db
+        fi
+
+        if [ ! -f /var/lib/a2tools/creds.db ]; then
+            sqlite3 /var/lib/a2tools/creds.db < /usr/share/a2tools/sql/creds.sql
+            chown root:root /var/lib/a2tools/creds.db
+            chmod 0600 /var/lib/a2tools/creds.db
+        fi
+
+        # Register the deploy hook so certbot's own renewal timer reloads
+        # Apache and updates the domains DB after every successful renewal.
+        install -d /etc/letsencrypt/renewal-hooks/deploy
+        ln -sf /usr/lib/a2tools/deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/a2tools
+        ;;
+esac
+
+# Automatically added by dh_installsystemd/13.14.1ubuntu5
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ] ; then
+	# The following line should be removed in trixie or trixie+1
+	deb-systemd-helper unmask 'a2tools-domain-cleanup.timer' >/dev/null || true
+
+	# was-enabled defaults to true, so new installations run enable.
+	if deb-systemd-helper --quiet was-enabled 'a2tools-domain-cleanup.timer'; then
+		# Enables the unit on first installation, creates new
+		# symlinks on upgrades if the unit file has changed.
+		deb-systemd-helper enable 'a2tools-domain-cleanup.timer' >/dev/null || true
+	else
+		# Update the statefile to add new symlinks (if any), which need to be
+		# cleaned up on purge. Also remove old symlinks.
+		deb-systemd-helper update-state 'a2tools-domain-cleanup.timer' >/dev/null || true
+	fi
+fi
+# End automatically added section
+# Automatically added by dh_installsystemd/13.14.1ubuntu5
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ] ; then
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		if [ -n "$2" ]; then
+			_dh_action=restart
+		else
+			_dh_action=start
+		fi
+		deb-systemd-invoke $_dh_action 'a2tools-domain-cleanup.service' 'a2tools-domain-cleanup.timer' >/dev/null || true
+	fi
+fi
+# End automatically added section
+

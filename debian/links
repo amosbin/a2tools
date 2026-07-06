@@ -1,0 +1,6 @@
+usr/lib/a2tools/a2sitemgr.sh usr/bin/a2sitemgr
+usr/lib/a2tools/a2certrenew.sh usr/bin/a2certrenew
+usr/lib/a2tools/a2wcrecalc.sh usr/bin/a2wcrecalc
+usr/lib/a2tools/a2wcrecalc-dms.sh usr/bin/a2wcrecalc-dms
+usr/lib/a2tools/fqdncredmgr.sh usr/bin/fqdncredmgr
+usr/lib/a2tools/fqdnmgr.sh usr/bin/fqdnmgr
