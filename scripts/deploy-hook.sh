@@ -29,4 +29,17 @@ else
     log_msg "deploy-hook: renewed $domain but apache reload FAILED"
 fi
 
+# A rootless docker-mailserver reads this certificate as the stack owner.
+# The renewal wrote new 0600 key files, so re-grant that read access.
+if dms_dir="$(dms_resolve_dir)"; then
+    dms_user="$(dms_owner "$dms_dir")"
+    if [ -n "$dms_user" ] && [ "$dms_user" != root ]; then
+        if dms_grant_cert_access "$dms_user" "$domain"; then
+            log_msg "deploy-hook: $dms_user can read $domain"
+        else
+            log_msg "deploy-hook: could not grant $dms_user read access to $domain"
+        fi
+    fi
+fi
+
 exit 0

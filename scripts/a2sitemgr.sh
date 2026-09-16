@@ -279,7 +279,8 @@ do_config() {
         fi
 
         # Only call a2wcrecalc-dms if Docker-Mailserver is installed
-        if command -v a2wcrecalc-dms >/dev/null 2>&1 && [ -d "/opt/compose/docker-mailserver/docker-data/dms/config" ]; then
+        if command -v a2wcrecalc-dms >/dev/null 2>&1 \
+            && _dms_dir="$(dms_resolve_dir)" && dms_config_dir "$_dms_dir" >/dev/null; then
             vecho "Calling a2wcrecalc-dms..."
             a2wcrecalc-dms || true
         fi

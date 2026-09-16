@@ -15,8 +15,19 @@ All arguments are named flags. The \fIdocker\-mailserver\fR directory
 is selected in this order: \fB\-d\fR / \fB\-\-dir\fR, then the
 \fBDMS_DIR\fR environment variable, then the value of \fBDMS_DIR\fR
 read from \fB/etc/a2tools/a2tools.conf\fR (or any
-\fI*.conf\fR under \fB/etc/a2tools/a2tools.conf.d/\fR), and finally
-the built\-in default \fB/opt/compose/docker\-mailserver\fR.
+\fI*.conf\fR under \fB/etc/a2tools/a2tools.conf.d/\fR), then the podmgr
+layout \fB/srv/podmgr/compose/dms\fR, and finally the built\-in default
+\fB/opt/compose/docker\-mailserver\fR. Only directories that exist are
+considered. The mapping files are written to \fIDMS_DIR\fB/config\fR, or to
+\fIDMS_DIR\fB/data/config\fR when the stack uses the podmgr layout.
+.PP
+The certificates those files point at live under the root\-only
+\fB/etc/letsencrypt\fR. When the stack belongs to a non\-root user (the
+owner of \fIDMS_DIR\fB/compose.yaml\fR, i.e. root inside a rootless
+container), \fBa2wcrecalc\-dms\fR grants that user read access to each
+mapped certificate with \fBsetfacl\fR(1). The certbot deploy hook
+re\-grants it after every renewal, because renewed private keys are
+written with mode 0600.
 .SH OPTIONS
 .TP
 .BR \-d ", " \-\-dir " " \fIDMS_DIR\fR

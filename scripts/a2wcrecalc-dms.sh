@@ -20,10 +20,14 @@ while [ $# -gt 0 ]; do
             cat <<EOF
 Usage: a2wcrecalc-dms -d DMS_DIR
 
-Recalculate Apache configs and regenerate docker-mailserver SNI mapping files.
+Recalculate Apache configs and regenerate docker-mailserver SNI mapping files,
+then let the stack's owner (the rootless container's root) read each mapped
+certificate.
 DMS_DIR resolution order: -d/--dir flag, then \$DMS_DIR env, then
 DMS_DIR from /etc/a2tools/a2tools.conf (or *.conf under
-/etc/a2tools/a2tools.conf.d/), then /opt/compose/docker-mailserver.
+/etc/a2tools/a2tools.conf.d/), then /srv/podmgr/compose/dms, then
+/opt/compose/docker-mailserver. The mapping files go to DMS_DIR/config or,
+in the podmgr layout, DMS_DIR/data/config.
 
 Options:
   -d, --dir DMS_DIR   Path to the docker-mailserver mount directory
@@ -38,18 +42,12 @@ EOF
     esac
 done
 
-if [ -n "$DMS_DIR_CLI" ] && [ -d "$DMS_DIR_CLI" ]; then
-    DMS_DIR="$DMS_DIR_CLI"
-elif [ -n "${DMS_DIR:-}" ] && [ -d "$DMS_DIR" ]; then
-    : # honour the env var or the value loaded from /etc/a2tools/a2tools.conf
-elif [ -d "/opt/compose/docker-mailserver" ]; then
-    DMS_DIR="/opt/compose/docker-mailserver"
-else
+if ! DMS_DIR="$(dms_resolve_dir "$DMS_DIR_CLI")"; then
     echo "DMS directory not found." >&2
     exit 1
 fi
-if [ ! -d "$DMS_DIR/config/" ]; then
-    echo "Config directory not found: $DMS_DIR/config/" >&2
+if ! DMS_CONFIG_DIR="$(dms_config_dir "$DMS_DIR")"; then
+    echo "Config directory not found: $DMS_DIR/config/ or $DMS_DIR/data/config/" >&2
     exit 1
 fi
 
@@ -97,7 +95,7 @@ for fqdn in "${!server_names[@]}"; do
 done
 
 # Save the SNI certificate map to the DMS config directory
-output_file="$DMS_DIR/config/sni_cert_map"
+output_file="$DMS_CONFIG_DIR/sni_cert_map"
 
 if [ -n "$sni_map_content" ]; then
     echo "$sni_map_content" > "$output_file"
@@ -138,7 +136,7 @@ for fqdn in "${!server_names[@]}"; do
 done
 
 # Save the Dovecot SNI configuration
-dovecot_output_file="$DMS_DIR/config/99-sni.conf"
+dovecot_output_file="$DMS_CONFIG_DIR/99-sni.conf"
 
 if [ -n "$dovecot_sni_content" ]; then
     echo "$dovecot_sni_content" > "$dovecot_output_file"
@@ -154,4 +152,21 @@ if [ -n "$dovecot_sni_content" ]; then
     echo "Dovecot SNI configuration saved to: $dovecot_output_file"
 else
     echo "Warning: No Dovecot SNI configuration generated." >&2
+fi
+
+# The files above point the mailserver at /etc/letsencrypt, which is
+# root-only. Let the stack owner (root inside a rootless container) read
+# exactly the certificates that were mapped.
+dms_user="$(dms_owner "$DMS_DIR")"
+if [ -z "$dms_user" ]; then
+    echo "Warning: cannot tell who owns $DMS_DIR/compose.yaml; certificate read access not granted." >&2
+elif [ "$dms_user" != root ]; then
+    for fqdn in "${!server_names[@]}"; do
+        [ -f "/etc/letsencrypt/live/$fqdn/privkey.pem" ] || continue
+        if dms_grant_cert_access "$dms_user" "$fqdn"; then
+            echo "Certificate read access for $dms_user: $fqdn"
+        else
+            echo "Warning: could not grant $dms_user read access to $fqdn" >&2
+        fi
+    done
 fi
