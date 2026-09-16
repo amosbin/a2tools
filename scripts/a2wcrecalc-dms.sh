@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-# -d / --dir selects the docker-mailserver directory (overrides $DMS_DIR and
-# the built-in /opt/compose/docker-mailserver default).
+# DMS_DIR, DMS_CONFIG_DIR and DMS_OWNER come from /etc/a2tools (see
+# 00-defaults.conf). -d / --dir overrides DMS_DIR for one run, and then the
+# config directory is taken as DMS_DIR/data/config (podmgr layout).
 
 # Pick up a2tools.conf / a2tools.conf.d/*.conf so the user can set DMS_DIR
 # (or other knobs) in /etc/a2tools/ without touching this script.
@@ -21,16 +22,15 @@ while [ $# -gt 0 ]; do
 Usage: a2wcrecalc-dms -d DMS_DIR
 
 Recalculate Apache configs and regenerate docker-mailserver SNI mapping files,
-then let the stack's owner (the rootless container's root) read each mapped
+then let DMS_OWNER (root inside a rootless container) read each mapped
 certificate.
-DMS_DIR resolution order: -d/--dir flag, then \$DMS_DIR env, then
-DMS_DIR from /etc/a2tools/a2tools.conf (or *.conf under
-/etc/a2tools/a2tools.conf.d/), then /srv/podmgr/compose/dms, then
-/opt/compose/docker-mailserver. The mapping files go to DMS_DIR/config or,
-in the podmgr layout, DMS_DIR/data/config.
+DMS_DIR, DMS_CONFIG_DIR and DMS_OWNER are read from
+/etc/a2tools/a2tools.conf (or *.conf under /etc/a2tools/a2tools.conf.d/).
+Defaults: /srv/podmgr/compose/dms, its data/config, and dms.
 
 Options:
-  -d, --dir DMS_DIR   Path to the docker-mailserver mount directory
+  -d, --dir DMS_DIR   Use this stack directory instead of DMS_DIR
+                      (config directory becomes DMS_DIR/data/config)
   -h, --help          Show this help
 EOF
             exit 0
@@ -42,12 +42,16 @@ EOF
     esac
 done
 
-if ! DMS_DIR="$(dms_resolve_dir "$DMS_DIR_CLI")"; then
-    echo "DMS directory not found." >&2
+if [ -n "$DMS_DIR_CLI" ]; then
+    DMS_DIR="$DMS_DIR_CLI"
+    DMS_CONFIG_DIR="$DMS_DIR/data/config"
+fi
+if [ ! -d "${DMS_DIR:-}" ]; then
+    echo "DMS directory not found: ${DMS_DIR:-<unset>}" >&2
     exit 1
 fi
-if ! DMS_CONFIG_DIR="$(dms_config_dir "$DMS_DIR")"; then
-    echo "Config directory not found: $DMS_DIR/config/ or $DMS_DIR/data/config/" >&2
+if [ ! -d "${DMS_CONFIG_DIR:-}" ]; then
+    echo "Config directory not found: ${DMS_CONFIG_DIR:-<unset>}" >&2
     exit 1
 fi
 
@@ -155,18 +159,40 @@ else
 fi
 
 # The files above point the mailserver at /etc/letsencrypt, which is
-# root-only. Let the stack owner (root inside a rootless container) read
-# exactly the certificates that were mapped.
-dms_user="$(dms_owner "$DMS_DIR")"
-if [ -z "$dms_user" ]; then
-    echo "Warning: cannot tell who owns $DMS_DIR/compose.yaml; certificate read access not granted." >&2
-elif [ "$dms_user" != root ]; then
+# root-only. Let DMS_OWNER (root inside a rootless container) read exactly
+# the certificates that were mapped: traverse on the tree, read on the
+# domain's live/ and archive/ entries.
+#
+# Re-run after every renewal (the a2tools deploy hook does): certbot writes
+# new private keys 0600, whose ACL mask hides any named entry, so a default
+# ACL alone would not survive.
+grant_cert_access() {
+    local user="$1" fqdn="$2" le=/etc/letsencrypt d
+    setfacl -m "u:$user:x" "$le" "$le/live" "$le/archive" || return 1
+    for d in "$le/live/$fqdn" "$le/archive/$fqdn"; do
+        [ -d "$d" ] || continue
+        setfacl -m "u:$user:rx" "$d" || return 1
+    done
+    if [ -d "$le/archive/$fqdn" ]; then
+        find "$le/archive/$fqdn" -type f -exec setfacl -m "u:$user:r" -m "m::r" {} + || return 1
+    fi
+}
+
+if [ -n "${DMS_OWNER:-}" ] && [ "$DMS_OWNER" != root ]; then
+    if ! command -v setfacl >/dev/null 2>&1; then
+        echo "Error: setfacl not installed; $DMS_OWNER cannot read the certificates." >&2
+        exit 1
+    fi
+    if ! id -u "$DMS_OWNER" >/dev/null 2>&1; then
+        echo "Error: DMS_OWNER '$DMS_OWNER' is not a user on this host." >&2
+        exit 1
+    fi
     for fqdn in "${!server_names[@]}"; do
         [ -f "/etc/letsencrypt/live/$fqdn/privkey.pem" ] || continue
-        if dms_grant_cert_access "$dms_user" "$fqdn"; then
-            echo "Certificate read access for $dms_user: $fqdn"
+        if grant_cert_access "$DMS_OWNER" "$fqdn"; then
+            echo "Certificate read access for $DMS_OWNER: $fqdn"
         else
-            echo "Warning: could not grant $dms_user read access to $fqdn" >&2
+            echo "Warning: could not grant $DMS_OWNER read access to $fqdn" >&2
         fi
     done
 fi

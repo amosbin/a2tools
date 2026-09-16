@@ -11,37 +11,43 @@ additionally generates the per\-domain mapping files used by
 to discover which virtual host each incoming connection should be
 routed to.
 .PP
-All arguments are named flags. The \fIdocker\-mailserver\fR directory
-is selected in this order: \fB\-d\fR / \fB\-\-dir\fR, then the
-\fBDMS_DIR\fR environment variable, then the value of \fBDMS_DIR\fR
-read from \fB/etc/a2tools/a2tools.conf\fR (or any
-\fI*.conf\fR under \fB/etc/a2tools/a2tools.conf.d/\fR), then the podmgr
-layout \fB/srv/podmgr/compose/dms\fR, and finally the built\-in default
-\fB/opt/compose/docker\-mailserver\fR. Only directories that exist are
-considered. The mapping files are written to \fIDMS_DIR\fB/config\fR, or to
-\fIDMS_DIR\fB/data/config\fR when the stack uses the podmgr layout.
+All arguments are named flags. The stack directory \fBDMS_DIR\fR, the
+directory the mapping files are written to \fBDMS_CONFIG_DIR\fR, and the
+stack owner \fBDMS_OWNER\fR are read from \fB/etc/a2tools/a2tools.conf\fR
+(or any \fI*.conf\fR under \fB/etc/a2tools/a2tools.conf.d/\fR). The shipped
+defaults are the podmgr layout: \fB/srv/podmgr/compose/dms\fR, its
+\fBdata/config\fR, and \fBdms\fR. \fB\-d\fR / \fB\-\-dir\fR overrides
+\fBDMS_DIR\fR for one run, and the mapping files then go to
+\fIDMS_DIR\fB/data/config\fR.
 .PP
 The certificates those files point at live under the root\-only
-\fB/etc/letsencrypt\fR. When the stack belongs to a non\-root user (the
-owner of \fIDMS_DIR\fB/compose.yaml\fR, i.e. root inside a rootless
-container), \fBa2wcrecalc\-dms\fR grants that user read access to each
-mapped certificate with \fBsetfacl\fR(1). The certbot deploy hook
-re\-grants it after every renewal, because renewed private keys are
-written with mode 0600.
+\fB/etc/letsencrypt\fR. When \fBDMS_OWNER\fR is set to a non\-root user
+(root inside a rootless container), \fBa2wcrecalc\-dms\fR grants that user
+read access to each mapped certificate with \fBsetfacl\fR(1). The certbot
+deploy hook runs \fBa2wcrecalc\-dms\fR after every renewal, because renewed
+private keys are written with mode 0600.
 .SH OPTIONS
 .TP
 .BR \-d ", " \-\-dir " " \fIDMS_DIR\fR
-Path to the \fBdocker\-mailserver\fR mount directory.
+Use this \fBdocker\-mailserver\fR stack directory instead of the
+configured \fBDMS_DIR\fR.
 .TP
 .BR \-h ", " \-\-help
 Print the embedded usage text and exit.
 .SH ENVIRONMENT
 .TP
 .B DMS_DIR
-Fallback path to the \fBdocker\-mailserver\fR mount directory
-(overridden by \fB\-d\fR; can also be set persistently in
-\fB/etc/a2tools/a2tools.conf\fR or any file under
-\fB/etc/a2tools/a2tools.conf.d/\fR).
+\fBdocker\-mailserver\fR stack directory (overridden by \fB\-d\fR).
+.TP
+.B DMS_CONFIG_DIR
+Directory the container mounts as \fB/tmp/docker\-mailserver\fR.
+.TP
+.B DMS_OWNER
+Host user owning the stack; empty for a rootful stack. For a podmgr stack:
+\fBstat \-c %U /srv/podmgr/compose/dms/compose.yaml\fR.
+.PP
+All three are normally set in \fB/etc/a2tools/a2tools.conf\fR or a file
+under \fB/etc/a2tools/a2tools.conf.d/\fR.
 .SH SEE ALSO
 .BR a2wcrecalc (1),
 .BR a2sitemgr (1)

@@ -8,5 +8,9 @@
 # Uncomment and edit any line below, or simply add new ones in the form
 # `KEY="value"` (or `KEY=value` for unquoted paths).
 #
-# Example: point a2wcrecalc-dms at a non-default docker-mailserver mount.
+# Example: point a2wcrecalc-dms at a non-podmgr docker-mailserver stack.
 # DMS_DIR="/srv/docker/docker-mailserver"
+# DMS_CONFIG_DIR="/srv/docker/docker-mailserver/config"
+# Stack owner (root inside a rootless container); empty for a rootful stack.
+# For a podmgr stack: stat -c %U /srv/podmgr/compose/dms/compose.yaml
+# DMS_OWNER="dms"
