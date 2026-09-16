@@ -8,6 +8,9 @@
 # Uncomment and edit any line below, or simply add new ones in the form
 # `KEY="value"` (or `KEY=value` for unquoted paths).
 #
+# On the mail host: run a2wcrecalc-dms after new vhosts and renewals.
+# DMS_ENABLED="true"
+#
 # Example: point a2wcrecalc-dms at a non-podmgr docker-mailserver stack.
 # DMS_DIR="/srv/docker/docker-mailserver"
 # DMS_CONFIG_DIR="/srv/docker/docker-mailserver/config"

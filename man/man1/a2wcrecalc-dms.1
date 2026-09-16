@@ -36,6 +36,11 @@ configured \fBDMS_DIR\fR.
 Print the embedded usage text and exit.
 .SH ENVIRONMENT
 .TP
+.B DMS_ENABLED
+When \fBtrue\fR, \fBa2sitemgr\fR(1) runs \fBa2wcrecalc\-dms\fR after adding
+a virtual host and the certbot deploy hook runs it after every renewal.
+Defaults to \fBfalse\fR. Running \fBa2wcrecalc\-dms\fR by hand is not gated.
+.TP
 .B DMS_DIR
 \fBdocker\-mailserver\fR stack directory (overridden by \fB\-d\fR).
 .TP

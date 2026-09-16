@@ -278,8 +278,8 @@ do_config() {
             render_template "$TEMPLATES_DIR/init_standard.conf.tpl" "$CONF"
         fi
 
-        # Only call a2wcrecalc-dms if Docker-Mailserver is installed
-        if command -v a2wcrecalc-dms >/dev/null 2>&1 && [ -d "${DMS_CONFIG_DIR:-}" ]; then
+        # Only call a2wcrecalc-dms on the mail host (DMS_ENABLED in a2tools.conf)
+        if [ "${DMS_ENABLED:-false}" = true ] && command -v a2wcrecalc-dms >/dev/null 2>&1; then
             vecho "Calling a2wcrecalc-dms..."
             a2wcrecalc-dms || true
         fi

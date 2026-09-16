@@ -31,7 +31,7 @@ fi
 
 # docker-mailserver: the renewal wrote new 0600 key files, so let
 # a2wcrecalc-dms regenerate its mapping and re-grant DMS_OWNER read access.
-if command -v a2wcrecalc-dms >/dev/null 2>&1 && [ -d "${DMS_CONFIG_DIR:-}" ]; then
+if [ "${DMS_ENABLED:-false}" = true ] && command -v a2wcrecalc-dms >/dev/null 2>&1; then
     if a2wcrecalc-dms >/dev/null 2>&1; then
         log_msg "deploy-hook: a2wcrecalc-dms refreshed docker-mailserver for $domain"
     else
